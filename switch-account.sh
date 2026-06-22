@@ -14,7 +14,14 @@ if [ "$MODE" = "live" ] && [ "$CONFIRM" != "yes" ]; then
   echo "⚠️  切到【实盘 综合户·真实资金】。确认请执行: $0 live yes"; exit 1
 fi
 ln -sfn "$TARGET" data/tiger_openapi_config.properties
-echo "active -> $TARGET ，重启服务中..."
-sudo docker compose restart >/dev/null 2>&1
+# C4: 切换账户绝不应自动下单——强制关闭自动开仓，避免切到实盘即开仓
+if grep -q '^OBOT_OPEN_ON_START=' .env 2>/dev/null; then
+  sed -i 's/^OBOT_OPEN_ON_START=.*/OBOT_OPEN_ON_START=false/' .env
+else
+  echo 'OBOT_OPEN_ON_START=false' >> .env
+fi
+echo "active -> $TARGET ，已强制 OBOT_OPEN_ON_START=false，重建容器中..."
+# C1: 必须用 up -d 重新创建容器以重载 .env（docker compose restart 不会重读 env_file）
+sudo docker compose up -d >/dev/null 2>&1
 sleep 6
 sudo docker exec -e PYTHONWARNINGS=ignore option-bot python -c "import os;from option_bot.config.loader import load_client_config_from_env as L;c=L(os.environ[\"TIGEROPEN_PROPS_PATH\"]);print(\"当前账户:\",c.account,\"is_paper=\",c.is_paper)"

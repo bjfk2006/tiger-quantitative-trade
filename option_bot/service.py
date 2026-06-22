@@ -212,13 +212,21 @@ def build_bot_from_env(env_get=os.environ.get):
 
     open_spec = None
     if _b(env_get('OBOT_OPEN_ON_START')):
-        open_spec = {
-            'symbol': env_get('OBOT_SYMBOL'),
-            'direction': env_get('OBOT_DIRECTION'),
-            'expiry': env_get('OBOT_EXPIRY'),
-            'strike': _f(env_get('OBOT_STRIKE'), None),
-            'qty': _i(env_get('OBOT_QTY'), 1),
-        }
+        # C3 安全闸：实盘账户(is_paper=False)默认禁止自动开仓，避免误下真实订单。
+        # 确需实盘自动开仓必须显式设置 OBOT_ALLOW_LIVE_AUTO_OPEN=true。
+        if not config.is_paper and not _b(env_get('OBOT_ALLOW_LIVE_AUTO_OPEN')):
+            logger.critical(
+                '实盘账户 %s (is_paper=False) 默认禁止自动开仓，已跳过 OPEN_ON_START。'
+                '如确需实盘自动开仓，请显式设置 OBOT_ALLOW_LIVE_AUTO_OPEN=true。',
+                account)
+        else:
+            open_spec = {
+                'symbol': env_get('OBOT_SYMBOL'),
+                'direction': env_get('OBOT_DIRECTION'),
+                'expiry': env_get('OBOT_EXPIRY'),
+                'strike': _f(env_get('OBOT_STRIKE'), None),
+                'qty': _i(env_get('OBOT_QTY'), 1),
+            }
     sup = Supervisor(sm, loop, cfg, cmd_queue, md=md, open_spec=open_spec)
     return sup, repo, cmd_queue
 
