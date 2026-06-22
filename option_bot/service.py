@@ -195,6 +195,7 @@ def build_bot_from_env(env_get=os.environ.get):
         close_buffer_minutes=_i(env_get('OBOT_CLOSE_BUFFER'), 5),
         poll_interval=_f(env_get('OBOT_POLL_INTERVAL'), 2.0),
         max_qty=_i(env_get('OBOT_MAX_QTY'), 1),
+        max_spread_pct=_f(env_get('OBOT_MAX_SPREAD'), 5.0),
         early_close_dates=_load_json(env_get('OBOT_EARLY_CLOSE_FILE')),
     )
     config = load_client_config_from_env(props_path=env_get('TIGEROPEN_PROPS_PATH'))
