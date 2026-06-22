@@ -159,6 +159,33 @@ class TestStateMachine(unittest.TestCase):
         sm.open(make_pick(), Direction.LONG, 1)
         sink.on_open.assert_called_once()
 
+    def test_resume_rejects_account_mismatch(self):
+        # 回归 M1: 快照账户与当前账户不一致 -> 丢弃快照、不认领、不查持仓
+        from option_bot.domain.models import TradeSnapshot
+        snap = TradeSnapshot(
+            account='other-acc-999', direction='LONG', pick=make_pick().__dict__,
+            qty=1, entry_price=8.0, tp_percent=30, sl_percent=50,
+            close_buffer_minutes=5, open_order_id=1, external_id='x',
+            state='MONITORING', opened_at=1000)
+        self.store.load.return_value = snap
+        self.td.account = 'paper-1'   # 当前账户 != 快照账户
+        self.assertFalse(self.sm.resume())
+        self.store.clear.assert_called_once()
+        self.td.get_option_position.assert_not_called()
+
+    def test_resume_adopts_when_account_matches(self):
+        from option_bot.domain.models import TradeSnapshot
+        snap = TradeSnapshot(
+            account='paper-1', direction='LONG', pick=make_pick().__dict__,
+            qty=1, entry_price=8.0, tp_percent=30, sl_percent=50,
+            close_buffer_minutes=5, open_order_id=1, external_id='x',
+            state='MONITORING', opened_at=1000)
+        self.store.load.return_value = snap
+        self.td.account = 'paper-1'
+        self.td.get_option_position.return_value = make_position(qty=1)
+        self.assertTrue(self.sm.resume())
+        self.assertEqual(self.sm.state, BotState.MONITORING)
+
     def test_current_pnl_uses_position_percent(self):
         self.sm.pick = make_pick()
         self.td.get_option_position.return_value = make_position(pnl_pct=25.0)

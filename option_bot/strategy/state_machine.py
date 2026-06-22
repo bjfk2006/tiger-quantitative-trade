@@ -184,6 +184,12 @@ class PositionStateMachine:
         snap = self._store.load()
         if not snap:
             return False
+        # M1: 校验快照账户 == 当前账户，防止切换账户后认领错账户的同名合约
+        if snap.account != self._td.account:
+            logger.warning('快照账户(%s) != 当前账户(%s)，丢弃快照、不认领该持仓（防跨账户误管理）',
+                           snap.account, self._td.account)
+            self._store.clear()
+            return False
         try:
             pick = OptionPick(**snap.pick)
         except TypeError:

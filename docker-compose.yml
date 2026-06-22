@@ -10,9 +10,10 @@ services:
     ports:
       # 看板：外网可达（用户名/密码）
       - "8000:8000"
-      # 操作面：默认容器内仅 127.0.0.1（OBOT_OPS_EXPOSE=false），即使映射也不可达。
-      # 需外网访问操作面时：设 OBOT_OPS_EXPOSE=true 并保留下面映射。
-      - "8001:8001"
+      # 操作面：宿主侧只绑回环(127.0.0.1)——M4 防误暴露。
+      # 即使 OBOT_OPS_EXPOSE=true 让容器绑 0.0.0.0，宿主侧也只在本机可达(供 SSH 隧道/本机)。
+      # 确需公网暴露操作面：手动改成 "8001:8001" 并设 OBOT_OPS_EXPOSE=true + 反代TLS。
+      - "127.0.0.1:8001:8001"
     volumes:
       # 持久化：SQLite db、token、state、私钥都放这里
       - ./data:/app/data
