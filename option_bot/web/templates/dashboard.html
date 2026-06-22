@@ -1,0 +1,91 @@
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+<meta charset="utf-8">
+<title>option_bot 看板</title>
+<style>
+  body { font-family: -apple-system, Segoe UI, Roboto, sans-serif; margin: 16px; background:#0f1115; color:#e6e6e6; }
+  h2 { margin: 18px 0 8px; font-size: 16px; }
+  table { border-collapse: collapse; width: 100%; font-size: 13px; }
+  th, td { border: 1px solid #2a2f3a; padding: 6px 8px; text-align: right; }
+  th { background:#1a1e27; text-align: right; }
+  td.l, th.l { text-align: left; }
+  .pos { color:#4caf50; } .neg { color:#ef5350; }
+  .bar { display:flex; align-items:center; gap:10px; }
+  .dot { width:10px; height:10px; border-radius:50%; display:inline-block; }
+  .alive { background:#4caf50; } .dead { background:#ef5350; }
+  .muted { color:#8a909c; font-size:12px; }
+</style>
+</head>
+<body>
+  <div class="bar">
+    <h2 style="margin:0">option_bot 看板</h2>
+    <span class="dot" id="dot"></span><span id="botState" class="muted"></span>
+    <span class="muted">· 自动刷新 3s</span>
+  </div>
+
+  <h2>当前持仓</h2>
+  <table>
+    <thead><tr>
+      <th class="l">标识</th><th class="l">方向</th><th>数量</th><th>入场价</th>
+      <th>现价</th><th>未实现盈亏</th><th>盈亏%</th><th class="l">状态</th>
+    </tr></thead>
+    <tbody id="posBody"><tr><td class="l muted" colspan="8">加载中…</td></tr></tbody>
+  </table>
+
+  <h2>交易记录</h2>
+  <table>
+    <thead><tr>
+      <th class="l">时间</th><th class="l">动作</th><th class="l">标识</th><th class="l">方向</th>
+      <th>数量</th><th>价格</th><th class="l">原因</th><th>平仓盈亏%</th>
+    </tr></thead>
+    <tbody id="tradeBody"><tr><td class="l muted" colspan="8">加载中…</td></tr></tbody>
+  </table>
+
+<script>
+function fmt(v, d) { return (v === null || v === undefined) ? '' : (typeof v === 'number' ? v.toFixed(d) : v); }
+function pctCell(v) {
+  if (v === null || v === undefined) return '<td></td>';
+  const cls = v >= 0 ? 'pos' : 'neg';
+  return '<td class="' + cls + '">' + (v >= 0 ? '+' : '') + v.toFixed(1) + '%</td>';
+}
+function ts(ms) { if (!ms) return ''; const d = new Date(ms); return d.toLocaleString(); }
+
+async function refresh() {
+  try {
+    const [hs, ps, tr] = await Promise.all([
+      fetch('/healthz').then(r => r.json()),
+      fetch('/api/positions').then(r => r.json()),
+      fetch('/api/trades?limit=100').then(r => r.json()),
+    ]);
+    const dot = document.getElementById('dot');
+    const alive = hs && hs.bot_alive;
+    dot.className = 'dot ' + (alive ? 'alive' : 'dead');
+    document.getElementById('botState').textContent = 'bot: ' + (alive ? 'alive' : 'down');
+
+    document.getElementById('posBody').innerHTML = (ps && ps.length)
+      ? ps.map(p =>
+        '<tr><td class="l">' + p.identifier + '</td><td class="l">' + p.direction +
+        '</td><td>' + fmt(p.qty, 0) + '</td><td>' + fmt(p.entry_price, 2) +
+        '</td><td>' + fmt(p.market_price, 2) + '</td><td>' + fmt(p.unrealized_pnl, 2) +
+        '</td>' + pctCell(p.unrealized_pnl_percent) + '<td class="l">' + (p.state || '') + '</td></tr>'
+      ).join('')
+      : '<tr><td class="l muted" colspan="8">无持仓</td></tr>';
+
+    document.getElementById('tradeBody').innerHTML = (tr && tr.length)
+      ? tr.map(t =>
+        '<tr><td class="l">' + ts(t.ts) + '</td><td class="l">' + t.action +
+        '</td><td class="l">' + t.identifier + '</td><td class="l">' + t.direction +
+        '</td><td>' + fmt(t.qty, 0) + '</td><td>' + fmt(t.price, 2) +
+        '</td><td class="l">' + (t.reason || '') + '</td>' + pctCell(t.pnl_percent) + '</tr>'
+      ).join('')
+      : '<tr><td class="l muted" colspan="8">无记录</td></tr>';
+  } catch (e) {
+    document.getElementById('botState').textContent = 'refresh error';
+  }
+}
+refresh();
+setInterval(refresh, 3000);
+</script>
+</body>
+</html>

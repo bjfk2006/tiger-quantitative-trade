@@ -1,0 +1,2 @@
+# option_bot Web 服务额外运行时依赖（SDK 依赖见根 pyproject.toml）
+flask>=2.0

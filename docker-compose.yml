@@ -1,0 +1,18 @@
+# option_bot 单服务编排（设计增量 §3/§13；不含 caddy，TLS 由用户自备反代）
+services:
+  option-bot:
+    build: .
+    image: option-bot:latest
+    container_name: option-bot
+    restart: unless-stopped
+    env_file:
+      - .env
+    ports:
+      # 看板：外网可达（用户名/密码）
+      - "8000:8000"
+      # 操作面：默认容器内仅 127.0.0.1（OBOT_OPS_EXPOSE=false），即使映射也不可达。
+      # 需外网访问操作面时：设 OBOT_OPS_EXPOSE=true 并保留下面映射。
+      - "8001:8001"
+    volumes:
+      # 持久化：SQLite db、token、state、私钥都放这里
+      - ./data:/app/data

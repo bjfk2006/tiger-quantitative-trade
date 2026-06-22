@@ -1,0 +1,15 @@
+.git
+.gitignore
+docs
+tests
+**/__pycache__
+**/*.pyc
+*.db
+*.db-wal
+*.db-shm
+data
+.env
+*.md
+!README.md
+install.sh
+install.ps1
