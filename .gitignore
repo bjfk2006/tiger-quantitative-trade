@@ -1,0 +1,44 @@
+# ============ 凭证 / 密钥（绝不提交！）============
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+id_rsa*
+rsa_private_key*
+tiger_openapi_config.properties
+tiger_openapi_token.properties
+*token*.properties
+
+# ============ 运行时数据 / 持久化 ============
+data/
+*.db
+*.db-wal
+*.db-shm
+*.sqlite
+*.sqlite3
+option_bot_state.json
+*.log
+
+# ============ Python 产物 ============
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+build/
+dist/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# ============ 虚拟环境 ============
+.venv/
+venv/
+env/
+
+# ============ IDE / OS ============
+.idea/
+.vscode/
+.DS_Store
