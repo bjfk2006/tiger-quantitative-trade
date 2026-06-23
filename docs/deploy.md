@@ -108,11 +108,16 @@ ln -sfn tiger_openapi_config_模拟.properties data/tiger_openapi_config.propert
 | `OBOT_WEB_PORT` | 看板端口，默认 8000 |
 | `OBOT_OPS_API_KEY` | 操作面 apikey；不填则操作面不启动 |
 | `OBOT_OPS_PORT` / `OBOT_OPS_EXPOSE` | 操作面端口 8001 / 是否对外（默认 false=仅本机） |
-| `OBOT_TP` / `OBOT_SL` | 止盈% / 止损% |
-| `OBOT_CLOSE_BUFFER` | 收盘前 N 分钟强平 |
+| `OBOT_TP` / `OBOT_SL` | 固定止盈% / 硬止损%（硬止损所有策略强制生效） |
+| `OBOT_CLOSE_BUFFER` | 收盘前 N 分钟强平（所有策略强制生效） |
 | `OBOT_POLL_INTERVAL` / `OBOT_MAX_QTY` / `OBOT_MAX_SPREAD` | 轮询间隔 / 单笔上限 / 最大点差% |
-| `OBOT_DB_FILE` / `OBOT_STATE_FILE` | `/app/data/option_bot.db` / `/app/data/option_bot_state.json` |
-| `OBOT_OPEN_ON_START` 等 | 容器启动是否自动开仓（默认 false，安全） |
+| **`OBOT_STRATEGY`** | 平仓策略：`threshold`/`trailing`/`breakeven`/`time_in_trade`/`bracket`（默认 threshold，见 §13） |
+| `OBOT_TRAIL_ACTIVATION` / `OBOT_TRAIL_GIVEBACK` | 移动止盈：武装阈值% / 从峰值回撤点数 |
+| `OBOT_BREAKEVEN_ACTIVATION` / `OBOT_BREAKEVEN_LOCK` | 保本：武装阈值% / 回吐到几%平(0=成本价)；bracket 中 0=关 |
+| `OBOT_MAX_HOLD_MINUTES` | 持仓时长上限(分钟)，0=关 |
+| `OBOT_DB_FILE` / `OBOT_STATE_FILE` / `OBOT_TICK_RETENTION_DAYS` | SQLite / 状态快照 / 逐tick保留天数(默认7) |
+| `OBOT_OPEN_ON_START` / `OBOT_ALLOW_LIVE_AUTO_OPEN` | 启动是否自动开仓（默认 false）/ 实盘自动开仓需显式 true（危险） |
+| `OBOT_SYMBOL`/`OBOT_DIRECTION`/`OBOT_EXPIRY`/`OBOT_STRIKE`/`OBOT_QTY` | 自动开仓的标的参数（配合 OPEN_ON_START） |
 
 生成强随机看板密码 / apikey：
 ```bash
@@ -270,3 +275,49 @@ git pull --ff-only && sudo docker compose up -d --build   # 升级
 ./switch-account.sh status              # 当前账户
 curl -fsS http://127.0.0.1:8000/healthz # 健康
 ```
+
+---
+
+## 13. 平仓策略（可插拔，开仓时选）
+
+每个策略都**强制自带**两条安全底座：**收盘前 N 分钟强平 + 硬止损**（任何策略不可绕过）；策略只定制「怎么止盈」。
+
+| `OBOT_STRATEGY` / `--strategy` | 行为 | 主要参数 |
+|---|---|---|
+| `threshold`（默认） | 盈利 ≥ `tp%` 即止盈 | `OBOT_TP` |
+| `trailing` | 涨破 `activation%` 武装，从峰值回撤 `giveback` 点即平（移动止盈） | `OBOT_TRAIL_ACTIVATION` / `OBOT_TRAIL_GIVEBACK` |
+| `breakeven` | 冲过 `activation%` 后回吐到 `lock%`(0=成本价) 即平（保本） | `OBOT_BREAKEVEN_ACTIVATION` / `OBOT_BREAKEVEN_LOCK` |
+| `time_in_trade` | 持仓超过 `max_hold` 分钟即平（theta 兜底） | `OBOT_MAX_HOLD_MINUTES` |
+| `bracket` | **可组合**：保本/移动止盈/固定止盈/时长 任选（值>0 启用） | 上述全部 |
+
+**组件优先级（bracket / 各策略统一）**：时间强平 > 硬止损 > 保本 > 移动止盈 > 固定止盈 > 时长 > 持有。
+
+**有状态策略（trailing/breakeven/bracket）的峰值/武装状态每 tick 持久化到状态快照，崩溃重启自动恢复。**
+
+CLI 用法示例：
+```bash
+# 移动止盈：涨破 +20% 后回撤 10 点平
+... run NVDA --direction LONG --expiry 2026-06-26 --strike 210 \
+    --strategy trailing --trail-activation 20 --trail-giveback 10 --sl 50
+
+# bracket 组合：止盈40 + 保本(冲20%回吐到5%) + 移动止盈(25%/10) + 2小时时长
+... run NVDA --direction LONG --expiry 2026-06-26 --strike 210 --strategy bracket \
+    --tp 40 --breakeven-activation 20 --breakeven-lock 5 \
+    --trail-activation 25 --trail-giveback 10 --max-hold-minutes 120 --sl 50
+```
+env 等价（服务自动开仓时）：`OBOT_STRATEGY=bracket` + 上面各 `OBOT_*` 变量。关掉某组件把对应值设 0。
+
+## 14. 看板：历史统计 + 持仓走势
+
+看板（`http://<host>:8000`，登录后）底部新增两块，均**只读**：
+
+- **历史统计（已平仓）**：选「从/到」日期(**美东时区**) → **刷新标识**(下拉按区间 groupby) → **查询**。展示总盈亏$/胜率/笔数/平均%/最大盈亏 + 累计盈亏折线 + 单笔明细。
+- **持仓走势（逐tick）**：在上方下拉选**具体标识** → 查询 → 显示持仓期间每 tick 的盈亏%/现价密集曲线（指标可切换）。
+
+对应只读 API（Basic 认证）：
+```
+GET /api/history?identifier=&from=&to=&account=      # 已平仓配对统计 + 累计曲线
+GET /api/history/identifiers?from=&to=&account=      # 下拉用：区间内标识
+GET /api/ticks?identifier=&from=&to=&account=        # 逐tick持仓走势(点多自动抽样)
+```
+> 逐tick 数据由监控循环每 tick 写入 `position_ticks` 表，按 `OBOT_TICK_RETENTION_DAYS`（默认7天）定期清理。无持仓/收盘时不产生新点。
