@@ -117,7 +117,11 @@ def chain_cmd(ctx, symbol, expiry, direction):
 @click.option('--trail-activation', default=20.0, type=float,
               help='trailing/bracket 移动止盈武装阈值%')
 @click.option('--trail-giveback', default=10.0, type=float,
-              help='trailing/bracket 从峰值回撤多少个点即平仓锁盈')
+              help='trailing/bracket 从峰值回撤多少个点(绝对)即平仓锁盈')
+@click.option('--trail-relative-ratio', default=0.0, type=float,
+              help='相对回撤比例%(0=纯绝对)；峰值≥阈值时回撤取 max(giveback, 峰值×比例%)')
+@click.option('--trail-relative-threshold', default=50.0, type=float,
+              help='相对回撤启用门槛%(峰值盈利≥此值才启用相对回撤)')
 @click.option('--breakeven-activation', default=0.0, type=float,
               help='breakeven/bracket 保本武装阈值%(bracket 中 0=关闭)')
 @click.option('--breakeven-lock', default=0.0, type=float,
@@ -135,6 +139,7 @@ def chain_cmd(ctx, symbol, expiry, direction):
 def run_cmd(ctx, symbol, direction, expiry, strike, qty, tp_percent, sl_percent,
             close_buffer_minutes, poll_interval, max_qty, max_spread_pct,
             strategy_name, trail_activation, trail_giveback,
+            trail_relative_ratio, trail_relative_threshold,
             breakeven_activation, breakeven_lock, max_hold_minutes, enable_open,
             early_close_file, state_file, db_file, yes):
     """开仓并自动盯盘平仓。"""
@@ -150,7 +155,10 @@ def run_cmd(ctx, symbol, direction, expiry, strike, qty, tp_percent, sl_percent,
             close_buffer_minutes=close_buffer_minutes, poll_interval=poll_interval,
             max_qty=max_qty, max_spread_pct=max_spread_pct,
             strategy_name=strategy_name, trail_activation=trail_activation,
-            trail_giveback=trail_giveback, breakeven_activation=breakeven_activation,
+            trail_giveback=trail_giveback,
+            trail_relative_ratio=trail_relative_ratio,
+            trail_relative_threshold=trail_relative_threshold,
+            breakeven_activation=breakeven_activation,
             breakeven_lock=breakeven_lock, max_hold_minutes=max_hold_minutes,
             enable_open=enable_open, early_close_dates=early_close,
         )

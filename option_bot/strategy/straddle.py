@@ -43,8 +43,13 @@ def combined_pnl_percent(legs, market_by_id):
 
 
 def decide_combined_close(combined_pnl, mtc, close_buffer, tp_mode, tp,
-                          trail_activation, trail_giveback, combo_state):
-    """组合层"平掉所有腿"决策（mutates combo_state for trailing）。返回 CloseReason 或 None。"""
+                          trail_activation, trail_giveback, combo_state,
+                          relative_ratio=0.0, relative_threshold=50.0):
+    """组合层"平掉所有腿"决策（mutates combo_state for trailing）。返回 CloseReason 或 None。
+
+    trailing 回撤阈值同单腿：混合 max(trail_giveback, peak×ratio%)（peak≥threshold 时）。
+    """
+    from option_bot.strategy.close_strategies import trailing_giveback
     if mtc is not None and mtc <= close_buffer:
         return CloseReason.TIME_FORCE_CLOSE
     if combined_pnl is None:
@@ -62,7 +67,8 @@ def decide_combined_close(combined_pnl, mtc, close_buffer, tp_mode, tp,
     peak = combo_state.get('peak')
     if peak is None or combined_pnl > peak:
         combo_state['peak'] = peak = combined_pnl
-    if combined_pnl <= peak - trail_giveback:
+    gb = trailing_giveback(peak, trail_giveback, relative_ratio, relative_threshold)
+    if combined_pnl <= peak - gb:
         return CloseReason.TRAILING_STOP
     return None
 
@@ -196,7 +202,8 @@ class StraddleManager:
         reason = decide_combined_close(
             combined, mtc, self._cfg.close_buffer_minutes, self._cfg.straddle_tp_mode,
             self._cfg.straddle_tp, self._cfg.straddle_trail_activation,
-            self._cfg.straddle_trail_giveback, self.combo_state)
+            self._cfg.straddle_trail_giveback, self.combo_state,
+            self._cfg.trail_relative_ratio, self._cfg.trail_relative_threshold)
         if reason is not None:
             self._close_all(reason)
             self._persist()

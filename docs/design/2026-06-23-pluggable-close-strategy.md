@@ -133,3 +133,28 @@ class StrategyContext:
 4. 本期只做 `threshold` + `trailing` 两个策略，对吗？（以后可再加：保本止损/分批止盈/ATR 等）
 
 确认这 4 点后，我按 §5 实现 + 单测 + 两台（香港模拟、需要时新加坡…已停）重建镜像。
+
+---
+
+## 附录 A（2026-06-23 增补）：相对比例回撤（混合模式）
+
+### 动机
+固定绝对 `giveback`（如 10 点）在高盈利时过早止盈：峰值 +200% 只要回到 +190% 就平，
+吃不到大波动。改为"盈利越大、容忍回撤越大"，但低盈利时仍要紧。
+
+### 规则（与用户确认）
+回撤阈值 `D`：
+- 峰值 `peak < threshold`（默认 50%）：`D = giveback`（绝对，沿用）
+- 峰值 `peak ≥ threshold`：`D = max(giveback, peak × ratio%)`
+- 平仓条件不变：`pnl ≤ peak − D`
+- `ratio = 0` → 纯绝对（向后兼容，默认关闭）
+
+示例（ratio=20, threshold=50, giveback=10）：峰值 +30%→D=10→跌回+20%平；
+峰值 +60%→D=12→+48%平；峰值 +200%→D=40→+160%平。
+
+### 落点
+- `close_strategies.trailing_giveback(peak, abs, ratio, threshold)` 纯函数，单一真相。
+- `TrailingStrategy` / `BracketStrategy` / `straddle.decide_combined_close` 三处共用该函数。
+- 配置：`StrategyConfig.trail_relative_ratio/threshold`；env `OBOT_TRAIL_RELATIVE_RATIO/THRESHOLD`；
+  CLI `--trail-relative-ratio/--trail-relative-threshold`。
+- 状态持久化不变（仍只存 armed/peak），阈值是每 tick 由 peak 现算，无需迁移旧快照。

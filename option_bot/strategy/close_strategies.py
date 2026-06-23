@@ -12,6 +12,19 @@ from typing import Optional
 from option_bot.domain.models import CloseReason
 
 
+def trailing_giveback(peak, abs_giveback, relative_ratio=0.0, relative_threshold=50.0):
+    """移动止盈的回撤阈值(点)。
+
+    默认 = 绝对 abs_giveback；当 relative_ratio>0 且 peak≥relative_threshold 时，
+    取 max(abs_giveback, peak × relative_ratio%)——盈利越大容忍回撤越大，但不小于绝对值。
+    relative_ratio=0 → 纯绝对（向后兼容）。平仓条件：pnl ≤ peak − 本函数返回值。
+    """
+    gb = abs_giveback
+    if relative_ratio and peak is not None and peak >= relative_threshold:
+        gb = max(abs_giveback, peak * relative_ratio / 100.0)
+    return gb
+
+
 @dataclass
 class StrategyContext:
     """每 tick 喂给策略的上下文。"""
@@ -84,10 +97,13 @@ class TrailingStrategy(BaseCloseStrategy):
     """
     name = 'trailing'
 
-    def __init__(self, close_buffer_minutes, sl_percent, trail_activation, trail_giveback):
+    def __init__(self, close_buffer_minutes, sl_percent, trail_activation, trail_giveback,
+                 relative_ratio=0.0, relative_threshold=50.0):
         super().__init__(close_buffer_minutes, sl_percent)
         self.trail_activation = trail_activation
         self.trail_giveback = trail_giveback
+        self.relative_ratio = relative_ratio
+        self.relative_threshold = relative_threshold
         self.armed = False
         self.peak = None
 
@@ -101,8 +117,10 @@ class TrailingStrategy(BaseCloseStrategy):
         # 已武装：峰值上移
         if self.peak is None or pnl > self.peak:
             self.peak = pnl
-        # 从峰值回撤达阈值 → 锁盈平仓
-        if pnl <= self.peak - self.trail_giveback:
+        # 从峰值回撤达阈值(绝对/相对混合) → 锁盈平仓
+        gb = trailing_giveback(self.peak, self.trail_giveback,
+                               self.relative_ratio, self.relative_threshold)
+        if pnl <= self.peak - gb:
             return CloseReason.TRAILING_STOP
         return None
 
@@ -168,13 +186,16 @@ class BracketStrategy(BaseCloseStrategy):
 
     def __init__(self, close_buffer_minutes, sl_percent, tp_percent,
                  breakeven_activation, breakeven_lock,
-                 trail_activation, trail_giveback, max_hold_minutes):
+                 trail_activation, trail_giveback, max_hold_minutes,
+                 trail_relative_ratio=0.0, trail_relative_threshold=50.0):
         super().__init__(close_buffer_minutes, sl_percent)
         self.tp_percent = tp_percent
         self.be_activation = breakeven_activation
         self.be_lock = breakeven_lock
         self.trail_activation = trail_activation
         self.trail_giveback = trail_giveback
+        self.trail_relative_ratio = trail_relative_ratio
+        self.trail_relative_threshold = trail_relative_threshold
         self.max_hold_minutes = max_hold_minutes
         self.be_armed = False
         self.trail_armed = False
@@ -194,8 +215,11 @@ class BracketStrategy(BaseCloseStrategy):
         # 阶段2：按优先级判触发
         if self.be_activation > 0 and self.be_armed and pnl <= self.be_lock:
             return CloseReason.BREAKEVEN
-        if self.trail_armed and pnl <= self.peak - self.trail_giveback:
-            return CloseReason.TRAILING_STOP
+        if self.trail_armed:
+            gb = trailing_giveback(self.peak, self.trail_giveback,
+                                   self.trail_relative_ratio, self.trail_relative_threshold)
+            if pnl <= self.peak - gb:
+                return CloseReason.TRAILING_STOP
         if self.tp_percent > 0 and pnl >= self.tp_percent:
             return CloseReason.TAKE_PROFIT
         if (self.max_hold_minutes > 0 and ctx.opened_at is not None
@@ -230,7 +254,8 @@ def build_strategy(name, cfg) -> CloseStrategy:
     if name == 'threshold':
         return ThresholdStrategy(cb, sl, cfg.tp_percent)
     if name == 'trailing':
-        return TrailingStrategy(cb, sl, cfg.trail_activation, cfg.trail_giveback)
+        return TrailingStrategy(cb, sl, cfg.trail_activation, cfg.trail_giveback,
+                                cfg.trail_relative_ratio, cfg.trail_relative_threshold)
     if name == 'breakeven':
         # standalone 时若未配 activation 则回退默认 20
         return BreakevenStrategy(cb, sl, cfg.breakeven_activation or 20.0, cfg.breakeven_lock)
@@ -239,5 +264,6 @@ def build_strategy(name, cfg) -> CloseStrategy:
     if name == 'bracket':
         return BracketStrategy(cb, sl, cfg.tp_percent, cfg.breakeven_activation,
                                cfg.breakeven_lock, cfg.trail_activation,
-                               cfg.trail_giveback, cfg.max_hold_minutes)
+                               cfg.trail_giveback, cfg.max_hold_minutes,
+                               cfg.trail_relative_ratio, cfg.trail_relative_threshold)
     raise ValueError(f'未知平仓策略: {name}（可选: {list(STRATEGY_REGISTRY)}）')

@@ -83,7 +83,10 @@ class StrategyConfig:
     # 平仓策略：threshold（默认，等价 tp/sl）/ trailing（移动止盈，涨破 activation 后回撤 giveback 平仓）
     strategy_name: str = 'threshold'
     trail_activation: float = 20.0    # trailing 武装阈值（+%）
-    trail_giveback: float = 10.0      # trailing 从峰值回撤多少个点即平仓
+    trail_giveback: float = 10.0      # trailing 从峰值回撤多少个点(绝对)即平仓
+    # 相对比例回撤（混合）：peak≥threshold 时，回撤阈值取 max(trail_giveback, peak×ratio%)
+    trail_relative_ratio: float = 0.0      # 0=关闭(纯绝对)；如 20 表示峰值的 20%
+    trail_relative_threshold: float = 50.0 # 仅当峰值盈利≥此值才启用相对回撤
     # breakeven（保本止损）：盈利冲过 activation% 后，回吐到 lock% 即平（0=保本点）
     breakeven_activation: float = 0.0  # 0=该组件关闭（bracket 用；standalone 会回退默认）
     breakeven_lock: float = 0.0

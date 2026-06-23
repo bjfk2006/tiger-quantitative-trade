@@ -9,7 +9,8 @@ from option_bot.strategy.close_strategies import (BracketStrategy,
                                                   ThresholdStrategy,
                                                   TimeInTradeStrategy,
                                                   TrailingStrategy,
-                                                  build_strategy)
+                                                  build_strategy,
+                                                  trailing_giveback)
 
 
 def ctx(pnl, mtc=None, opened_at=None, now_ts=None):
@@ -84,6 +85,61 @@ class TestTrailing(unittest.TestCase):
         self.assertEqual(s2.peak, 25)
         # 恢复后继续：回撤达标即平
         self.assertEqual(s2.decide(ctx(15, 100)), CloseReason.TRAILING_STOP)
+
+
+class TestTrailingGivebackHelper(unittest.TestCase):
+    """混合回撤阈值：peak<threshold 用绝对；peak≥threshold 取 max(绝对, peak×ratio%)。"""
+
+    def test_ratio_zero_is_pure_absolute(self):
+        self.assertEqual(trailing_giveback(200, 10, relative_ratio=0), 10)
+        self.assertEqual(trailing_giveback(30, 10, relative_ratio=0), 10)
+
+    def test_below_threshold_uses_absolute(self):
+        # 峰值 30 < 50 → 仍按绝对 10
+        self.assertEqual(trailing_giveback(30, 10, relative_ratio=20, relative_threshold=50), 10)
+
+    def test_at_and_above_threshold_uses_max(self):
+        # 峰值 60 → max(10, 60×20%)=max(10,12)=12
+        self.assertEqual(trailing_giveback(60, 10, relative_ratio=20, relative_threshold=50), 12)
+        # 峰值 200 → max(10, 40)=40
+        self.assertEqual(trailing_giveback(200, 10, relative_ratio=20, relative_threshold=50), 40)
+        # 峰值刚好等于阈值 50 → max(10, 10)=10
+        self.assertEqual(trailing_giveback(50, 10, relative_ratio=20, relative_threshold=50), 10)
+
+    def test_none_peak_safe(self):
+        self.assertEqual(trailing_giveback(None, 10, relative_ratio=20), 10)
+
+
+class TestTrailingRelative(unittest.TestCase):
+    """TrailingStrategy 启用相对回撤后的端到端行为。"""
+
+    def setUp(self):
+        # ratio=20%，门槛 50%，绝对兜底 10
+        self.s = TrailingStrategy(close_buffer_minutes=5, sl_percent=50,
+                                  trail_activation=20, trail_giveback=10,
+                                  relative_ratio=20, relative_threshold=50)
+
+    def test_peak200_exit_at_160(self):
+        self.s.decide(ctx(200, 100))           # arm, peak=200, D=max(10,40)=40
+        self.assertIsNone(self.s.decide(ctx(165, 100)))   # 165 > 200-40=160 持有
+        self.assertEqual(self.s.decide(ctx(160, 100)), CloseReason.TRAILING_STOP)
+
+    def test_below_threshold_uses_absolute_10(self):
+        # 峰值 30 < 50 → 仍绝对 10：回到 20 才平
+        self.s.decide(ctx(30, 100))
+        self.assertIsNone(self.s.decide(ctx(21, 100)))
+        self.assertEqual(self.s.decide(ctx(20, 100)), CloseReason.TRAILING_STOP)
+
+    def test_peak60_exit_at_48(self):
+        # 峰值 60 → D=max(10,12)=12 → 回到 48 平
+        self.s.decide(ctx(60, 100))
+        self.assertIsNone(self.s.decide(ctx(49, 100)))
+        self.assertEqual(self.s.decide(ctx(48, 100)), CloseReason.TRAILING_STOP)
+
+    def test_ratio_zero_backward_compatible(self):
+        s = TrailingStrategy(5, 50, 20, 10, relative_ratio=0)
+        s.decide(ctx(200, 100))                # peak=200, 纯绝对 D=10
+        self.assertEqual(s.decide(ctx(190, 100)), CloseReason.TRAILING_STOP)
 
 
 class TestBreakeven(unittest.TestCase):
