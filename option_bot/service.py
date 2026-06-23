@@ -21,7 +21,6 @@ from option_bot.persistence.db import SqliteRepo
 from option_bot.persistence.sink import SqliteSink
 from option_bot.strategy.market_clock import MarketClock
 from option_bot.strategy.monitor_loop import MonitorLoop
-from option_bot.strategy.risk_guard import RiskGuard
 from option_bot.strategy.state_machine import PositionStateMachine
 
 logger = logging.getLogger('option_bot.service')
@@ -196,6 +195,9 @@ def build_bot_from_env(env_get=os.environ.get):
         poll_interval=_f(env_get('OBOT_POLL_INTERVAL'), 2.0),
         max_qty=_i(env_get('OBOT_MAX_QTY'), 1),
         max_spread_pct=_f(env_get('OBOT_MAX_SPREAD'), 5.0),
+        strategy_name=env_get('OBOT_STRATEGY') or 'threshold',
+        trail_activation=_f(env_get('OBOT_TRAIL_ACTIVATION'), 20.0),
+        trail_giveback=_f(env_get('OBOT_TRAIL_GIVEBACK'), 10.0),
         early_close_dates=_load_json(env_get('OBOT_EARLY_CLOSE_FILE')),
     )
     config = load_client_config_from_env(props_path=env_get('TIGEROPEN_PROPS_PATH'))
@@ -207,7 +209,7 @@ def build_bot_from_env(env_get=os.environ.get):
     sink = SqliteSink(repo, tick_retention_days=_i(env_get('OBOT_TICK_RETENTION_DAYS'), 7))
     store = StateStore(env_get('OBOT_STATE_FILE') or 'data/option_bot_state.json')
     sm = PositionStateMachine(td, md, store, cfg, sink=sink)
-    loop = MonitorLoop(sm, MarketClock(md, cfg), RiskGuard(cfg), cfg)
+    loop = MonitorLoop(sm, MarketClock(md, cfg), cfg)
     cmd_queue = CommandQueue()
 
     open_spec = None

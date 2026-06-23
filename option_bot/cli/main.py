@@ -23,7 +23,6 @@ from option_bot.config.state_store import StateStore, DEFAULT_PATH
 from option_bot.domain.models import Direction
 from option_bot.strategy.market_clock import MarketClock
 from option_bot.strategy.monitor_loop import MonitorLoop
-from option_bot.strategy.risk_guard import RiskGuard
 from option_bot.strategy.state_machine import PositionStateMachine
 
 
@@ -111,6 +110,12 @@ def chain_cmd(ctx, symbol, expiry, direction):
 @click.option('--max-qty', default=1, type=int, help='单笔数量上限')
 @click.option('--max-spread', 'max_spread_pct', default=5.0, type=float,
               help='市价单允许的最大相对点差%(超过则拒单防滑点；流动性差/盘前可调大)')
+@click.option('--strategy', 'strategy_name', type=click.Choice(['threshold', 'trailing']),
+              default='threshold', help='平仓策略：threshold(固定止盈) / trailing(移动止盈)')
+@click.option('--trail-activation', default=20.0, type=float,
+              help='trailing 武装阈值%(涨破即开始移动止盈)')
+@click.option('--trail-giveback', default=10.0, type=float,
+              help='trailing 从峰值回撤多少个点即平仓锁盈')
 @click.option('--enable-open/--no-enable-open', 'enable_open', default=True,
               help='是否允许开新仓（kill switch：--no-enable-open 只盯盘/平仓不开仓）')
 @click.option('--early-close-file', default=None,
@@ -120,7 +125,8 @@ def chain_cmd(ctx, symbol, expiry, direction):
 @click.option('--yes', is_flag=True, help='跳过下单前确认')
 @click.pass_context
 def run_cmd(ctx, symbol, direction, expiry, strike, qty, tp_percent, sl_percent,
-            close_buffer_minutes, poll_interval, max_qty, max_spread_pct, enable_open,
+            close_buffer_minutes, poll_interval, max_qty, max_spread_pct,
+            strategy_name, trail_activation, trail_giveback, enable_open,
             early_close_file, state_file, db_file, yes):
     """开仓并自动盯盘平仓。"""
     log = logging.getLogger('option_bot.cli')
@@ -134,6 +140,8 @@ def run_cmd(ctx, symbol, direction, expiry, strike, qty, tp_percent, sl_percent,
             tp_percent=tp_percent, sl_percent=sl_percent,
             close_buffer_minutes=close_buffer_minutes, poll_interval=poll_interval,
             max_qty=max_qty, max_spread_pct=max_spread_pct,
+            strategy_name=strategy_name, trail_activation=trail_activation,
+            trail_giveback=trail_giveback,
             enable_open=enable_open, early_close_dates=early_close,
         )
 
@@ -149,7 +157,6 @@ def run_cmd(ctx, symbol, direction, expiry, strike, qty, tp_percent, sl_percent,
             sink = SqliteSink(SqliteRepo(db_file))
         sm = PositionStateMachine(td, md, store, cfg, sink=sink)
         clock = MarketClock(md, cfg)
-        risk = RiskGuard(cfg)
 
         # 优雅停机
         stop = {'flag': False}
@@ -175,7 +182,7 @@ def run_cmd(ctx, symbol, direction, expiry, strike, qty, tp_percent, sl_percent,
                 return
             sm.open(pick, dir_enum, qty)
 
-        loop = MonitorLoop(sm, clock, risk, cfg, should_stop=lambda: stop['flag'])
+        loop = MonitorLoop(sm, clock, cfg, should_stop=lambda: stop['flag'])
         loop.run()
         click.echo(f'结束，最终状态: {sm.state.value}')
     except OptionBotError as e:

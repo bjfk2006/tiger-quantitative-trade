@@ -32,10 +32,11 @@ class BotState(Enum):
 
 
 class CloseReason(Enum):
-    """平仓触发原因。评估优先级见 RiskGuard：TIME > STOP_LOSS > TAKE_PROFIT。"""
+    """平仓触发原因。优先级（基类强制）：TIME > STOP_LOSS > 策略盈利了结(TP/TRAILING)。"""
     TAKE_PROFIT = 'TAKE_PROFIT'
     STOP_LOSS = 'STOP_LOSS'
     TIME_FORCE_CLOSE = 'TIME_FORCE_CLOSE'
+    TRAILING_STOP = 'TRAILING_STOP'   # 移动止盈/回撤保护触发
     MANUAL = 'MANUAL'
 
 
@@ -74,9 +75,13 @@ class PositionView:
 @dataclass
 class StrategyConfig:
     """策略与风控参数（设计文档 §1 非功能 / §10 风控）。"""
-    tp_percent: float = 30.0          # 止盈阈值（+%）
-    sl_percent: float = 50.0          # 止损阈值（-%，正数表示亏损幅度）
-    close_buffer_minutes: int = 5     # 收盘前 N 分钟强平
+    tp_percent: float = 30.0          # 止盈阈值（+%，threshold 策略用）
+    sl_percent: float = 50.0          # 硬止损阈值（-%，所有策略强制生效）
+    close_buffer_minutes: int = 5     # 收盘前 N 分钟强平（所有策略强制生效）
+    # 平仓策略：threshold（默认，等价 tp/sl）/ trailing（移动止盈，涨破 activation 后回撤 giveback 平仓）
+    strategy_name: str = 'threshold'
+    trail_activation: float = 20.0    # trailing 武装阈值（+%）
+    trail_giveback: float = 10.0      # trailing 从峰值回撤多少个点即平仓
     poll_interval: float = 2.0        # 监控轮询间隔（秒）
     near_close_poll_interval: float = 5.0  # 临近收盘窗口收紧后的最大间隔（秒）
     max_qty: int = 1                  # 单笔最大数量上限
@@ -120,10 +125,15 @@ class TradeSnapshot:
     external_id: Optional[str]
     state: str
     opened_at: Optional[int]
+    # 策略与其运行态（带默认值，兼容旧快照；用于 trailing 等有状态策略崩溃恢复）
+    strategy_name: str = 'threshold'
+    strategy_state: dict = field(default_factory=dict)
 
     def to_dict(self) -> dict:
         return asdict(self)
 
     @classmethod
     def from_dict(cls, d: dict) -> 'TradeSnapshot':
-        return cls(**d)
+        # 忽略未知字段，向后兼容快照结构演进
+        valid = cls.__dataclass_fields__.keys()
+        return cls(**{k: v for k, v in d.items() if k in valid})

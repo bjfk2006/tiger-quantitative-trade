@@ -137,14 +137,17 @@ class TestStateMachine(unittest.TestCase):
 
     def test_open_partial_fill_enters_monitoring(self):
         # 回归 #3: 部分成交必须纳入盯盘（filled 数量），不得遗弃
+        cfg = StrategyConfig(max_qty=3, fill_timeout=5, fill_poll_interval=0)
+        sm = PositionStateMachine(self.td, self.md, self.store, cfg,
+                                  sleep=lambda *_: None, now_ms=lambda: 1000)
         self.md.get_option_quote.return_value = {'bid_price': 8.0, 'ask_price': 8.1}
         self.md.is_market_trading.return_value = True
         self.td.open_market.return_value = 9005
         self.td.get_order_status.return_value = {
             'status': 'HELD', 'filled': 1, 'remaining': 2, 'avg_fill_price': 8.05}
-        self.sm.open(make_pick(), Direction.LONG, 3)
-        self.assertEqual(self.sm.state, BotState.MONITORING)
-        self.assertEqual(self.sm.qty, 1)  # 按已成交数量
+        sm.open(make_pick(), Direction.LONG, 3)   # qty 3 ≤ max_qty 3
+        self.assertEqual(sm.state, BotState.MONITORING)
+        self.assertEqual(sm.qty, 1)  # 按已成交数量
 
     def test_open_invokes_sink(self):
         # 持久化解耦：开仓成交后应调用 sink.on_open（NullSink 默认不破坏其他用例）

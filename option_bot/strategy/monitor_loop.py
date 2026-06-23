@@ -9,16 +9,16 @@ import time
 
 from option_bot.adapters.errors import CloseRejected, DataUnavailable
 from option_bot.domain.models import BotState
+from option_bot.strategy.close_strategies import StrategyContext
 
 logger = logging.getLogger('option_bot.loop')
 
 
 class MonitorLoop:
-    def __init__(self, state_machine, market_clock, risk_guard, config,
+    def __init__(self, state_machine, market_clock, config,
                  sleep=time.sleep, should_stop=None):
         self._sm = state_machine
         self._clock = market_clock
-        self._risk = risk_guard
         self._cfg = config
         self._sleep = sleep
         self._should_stop = should_stop or (lambda: False)
@@ -43,7 +43,7 @@ class MonitorLoop:
         """
         try:
             mtc = self._clock.minutes_to_close()
-            pnl, _pos = self._sm.current_pnl_percent()
+            pnl, pos = self._sm.current_pnl_percent()
             self._data_failures = 0
         except DataUnavailable as e:
             self._data_failures += 1
@@ -57,7 +57,11 @@ class MonitorLoop:
         if pnl is None and mtc is None:
             return self._next_interval(mtc)
 
-        reason = self._risk.evaluate(pnl, mtc)
+        ctx = StrategyContext(pnl_percent=pnl, minutes_to_close=mtc,
+                              market_price=(pos.market_price if pos else None),
+                              entry_price=self._sm.entry_price,
+                              now_ts=int(time.time() * 1000))
+        reason = self._sm.decide_close(ctx)
         if reason is not None:
             pnl_disp = f'{pnl:.1f}%' if pnl is not None else 'n/a'
             logger.info('触发平仓 reason=%s pnl=%s 距收盘=%s min',

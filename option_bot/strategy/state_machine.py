@@ -37,6 +37,9 @@ class PositionStateMachine:
         self.qty = 0
         self.entry_price = None
         self.open_order_id = None
+        self._strategy = None       # 平仓策略实例（开仓/恢复时构建）
+        self._tag = None            # 去重/追踪标记，持久化用
+        self._opened_at = None
 
     # ---------- 开仓 ----------
     def open(self, pick: OptionPick, direction: Direction, qty: int):
@@ -54,6 +57,9 @@ class PositionStateMachine:
             raise OpenRejected(reason)
 
         self.pick, self.direction, self.qty = pick, direction, qty
+        # 按配置构建平仓策略（threshold / trailing ...）
+        from option_bot.strategy.close_strategies import build_strategy
+        self._strategy = build_strategy(self._cfg.strategy_name, self._cfg)
         tag = self._td.new_dedup_tag()
         self.state = BotState.OPENING
         self._save(tag, None)
@@ -178,6 +184,17 @@ class PositionStateMachine:
         cur = self._mid_from_quote(quote)
         return compute_pnl_percent(self.entry_price, cur), pos
 
+    def decide_close(self, ctx):
+        """委托当前策略判断是否平仓；每 tick 持久化策略状态（崩溃可恢复）。"""
+        if self._strategy is None:
+            return None
+        reason = self._strategy.decide(ctx)
+        try:
+            self._save()  # 持久化最新策略状态(trailing 峰值等)
+        except Exception as e:  # noqa: BLE001
+            logger.warning('持久化策略状态失败: %s', e)
+        return reason
+
     # ---------- 崩溃恢复（设计 Flow 5.3）----------
     def resume(self):
         """启动时以远端持仓为准核对快照，恢复 MONITORING 或清快照。"""
@@ -210,12 +227,25 @@ class PositionStateMachine:
         self.qty = snap.qty
         self.entry_price = snap.entry_price
         self.open_order_id = snap.open_order_id
+        self._tag = snap.external_id
+        self._opened_at = snap.opened_at
+        # 重建策略并还原运行态（trailing 峰值等）
+        from option_bot.strategy.close_strategies import build_strategy
+        self._strategy = build_strategy(getattr(snap, 'strategy_name', None), self._cfg)
+        self._strategy.load_state(getattr(snap, 'strategy_state', None) or {})
         self.state = BotState.MONITORING
-        logger.info('已从快照恢复持仓 %s qty=%s -> MONITORING', pick.identifier, snap.qty)
+        logger.info('已从快照恢复持仓 %s qty=%s 策略=%s -> MONITORING',
+                    pick.identifier, snap.qty, self._strategy.name)
         return True
 
     # ---------- 快照写入 ----------
-    def _save(self, tag, order_id):
+    def _save(self, tag=None, order_id=None):
+        if tag is not None:
+            self._tag = tag
+        if order_id is not None:
+            self.open_order_id = order_id
+        if self._opened_at is None:
+            self._opened_at = self._now_ms()
         snap = TradeSnapshot(
             account=self._td.account,
             direction=self.direction.value if self.direction else None,
@@ -225,9 +255,11 @@ class PositionStateMachine:
             tp_percent=self._cfg.tp_percent,
             sl_percent=self._cfg.sl_percent,
             close_buffer_minutes=self._cfg.close_buffer_minutes,
-            open_order_id=order_id,
-            external_id=tag,
+            open_order_id=self.open_order_id,
+            external_id=self._tag,
             state=self.state.value,
-            opened_at=self._now_ms(),
+            opened_at=self._opened_at,
+            strategy_name=self._strategy.name if self._strategy else self._cfg.strategy_name,
+            strategy_state=self._strategy.state() if self._strategy else {},
         )
         self._store.save(snap)
