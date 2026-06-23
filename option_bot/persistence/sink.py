@@ -43,10 +43,12 @@ class NullSink(EventSink):
 
 
 class SqliteSink(EventSink):
-    """落 SQLite：trades(开/平历史) + positions(当前快照)。"""
+    """落 SQLite：trades(开/平历史) + positions(当前快照) + position_ticks(逐tick时序)。"""
 
-    def __init__(self, repo):
+    def __init__(self, repo, tick_retention_days=7):
         self._repo = repo
+        self._tick_retention_days = tick_retention_days
+        self._tick_count = 0
 
     def on_open(self, account, pick, direction, qty, entry_price, order_id):
         d = direction.value if hasattr(direction, 'value') else str(direction)
@@ -66,6 +68,20 @@ class SqliteSink(EventSink):
             direction=d, qty=view.quantity, entry_price=entry_price,
             market_price=view.market_price, unrealized_pnl=view.unrealized_pnl,
             unrealized_pnl_percent=view.unrealized_pnl_percent, state='MONITORING')
+        # 逐tick时序：每 tick 追加一条，供「持仓走势」密集曲线
+        self._repo.insert_position_tick(
+            account=account, identifier=pick.identifier, symbol=pick.symbol,
+            market_price=view.market_price, unrealized_pnl=view.unrealized_pnl,
+            unrealized_pnl_percent=view.unrealized_pnl_percent)
+        # 定期清理（每约 600 tick≈20 分钟），按保留天数删旧
+        self._tick_count += 1
+        if self._tick_count % 600 == 0:
+            import time as _t
+            cutoff = int(_t.time() * 1000) - self._tick_retention_days * 86400 * 1000
+            try:
+                self._repo.prune_position_ticks(cutoff)
+            except Exception:  # noqa: BLE001
+                pass
 
     def on_close(self, account, pick, direction, qty, price, reason, order_id, entry_price):
         d = direction.value if hasattr(direction, 'value') else str(direction)

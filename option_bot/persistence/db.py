@@ -51,6 +51,18 @@ CREATE TABLE IF NOT EXISTS ops_audit (
     key_id    TEXT,
     result    TEXT
 );
+
+CREATE TABLE IF NOT EXISTS position_ticks (
+    id           INTEGER PRIMARY KEY AUTOINCREMENT,
+    ts           INTEGER NOT NULL,
+    account      TEXT,
+    identifier   TEXT,
+    symbol       TEXT,
+    market_price REAL,
+    unrealized_pnl         REAL,
+    unrealized_pnl_percent REAL
+);
+CREATE INDEX IF NOT EXISTS idx_ticks_id_ts ON position_ticks(identifier, ts);
 """
 
 
@@ -174,3 +186,33 @@ class SqliteRepo:
                 'SELECT * FROM ops_audit ORDER BY ts DESC, id DESC LIMIT ?',
                 (limit,)).fetchall()
         return [dict(r) for r in rows]
+
+    # ---------- position ticks（逐tick时序）----------
+    def insert_position_tick(self, account, identifier, symbol, market_price,
+                             unrealized_pnl, unrealized_pnl_percent, ts=None):
+        with closing(self._conn()) as conn, conn:
+            conn.execute(
+                'INSERT INTO position_ticks(ts,account,identifier,symbol,'
+                'market_price,unrealized_pnl,unrealized_pnl_percent) VALUES(?,?,?,?,?,?,?)',
+                (ts or _now_ms(), account, identifier, symbol, market_price,
+                 unrealized_pnl, unrealized_pnl_percent))
+
+    def list_ticks_in_range(self, identifier, account=None, start_ts=None, end_ts=None):
+        """某标识在时间区间内的逐tick(升序)。identifier 必填。"""
+        q = 'SELECT ts,market_price,unrealized_pnl,unrealized_pnl_percent FROM position_ticks WHERE identifier=?'
+        args = [identifier]
+        if account:
+            q += ' AND account=?'; args.append(account)
+        if start_ts is not None:
+            q += ' AND ts>=?'; args.append(start_ts)
+        if end_ts is not None:
+            q += ' AND ts<?'; args.append(end_ts)
+        q += ' ORDER BY ts ASC'
+        with closing(self._conn()) as conn:
+            rows = conn.execute(q, args).fetchall()
+        return [dict(r) for r in rows]
+
+    def prune_position_ticks(self, before_ts):
+        """删除早于 before_ts 的 tick（保留策略，控制表增长）。"""
+        with closing(self._conn()) as conn, conn:
+            conn.execute('DELETE FROM position_ticks WHERE ts<?', (before_ts,))

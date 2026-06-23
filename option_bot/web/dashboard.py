@@ -9,8 +9,9 @@ import logging
 import pytz
 from flask import Flask, Response, jsonify, render_template, request
 
-from option_bot.persistence.stats import (equity_curve, filter_by_close_ts,
-                                           pair_round_trips, summarize)
+from option_bot.persistence.stats import (downsample, equity_curve,
+                                           filter_by_close_ts, pair_round_trips,
+                                           summarize)
 from option_bot.web.auth import check_basic
 
 logger = logging.getLogger('option_bot.web.dashboard')
@@ -96,6 +97,25 @@ def create_dashboard_app(repo, user, password, status_provider=None):
             return jsonify({'error': 'invalid date (YYYY-MM-DD)'}), 400
         except Exception as e:  # noqa: BLE001
             logger.error('读取历史统计失败: %s', e)
+            return jsonify({'error': str(e)}), 500
+
+    @app.route('/api/ticks')
+    def ticks():
+        identifier = request.args.get('identifier') or None
+        if not identifier:
+            return jsonify({'error': 'identifier required'}), 400
+        account = request.args.get('account') or None
+        max_points = request.args.get('max_points', default=1000, type=int)
+        try:
+            start_ms, end_ms = _date_to_ms_range(request.args.get('from'),
+                                                 request.args.get('to'))
+            rows = repo.list_ticks_in_range(identifier, account, start_ms, end_ms)
+            return jsonify({'identifier': identifier, 'count': len(rows),
+                            'ticks': downsample(rows, max_points)})
+        except ValueError:
+            return jsonify({'error': 'invalid date (YYYY-MM-DD)'}), 400
+        except Exception as e:  # noqa: BLE001
+            logger.error('读取逐tick失败: %s', e)
             return jsonify({'error': str(e)}), 500
 
     @app.route('/healthz')

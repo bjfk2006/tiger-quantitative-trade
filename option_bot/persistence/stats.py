@@ -83,6 +83,18 @@ def summarize(rts):
     }
 
 
+def downsample(rows, max_points=1000):
+    """点过多时均匀抽样到 <= max_points（始终保留最后一点）。"""
+    n = len(rows)
+    if max_points <= 0 or n <= max_points:
+        return rows
+    step = (n + max_points - 1) // max_points  # ceil
+    out = rows[::step]
+    if out and out[-1] is not rows[-1]:
+        out.append(rows[-1])
+    return out
+
+
 def equity_curve(rts):
     """按平仓时间升序累计 pnl_amount，返回 [{ts, cum_pnl}]。"""
     s = sorted([r for r in rts if r.get('close_ts') is not None],

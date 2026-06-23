@@ -2,8 +2,21 @@
 """已平仓盈亏统计单测（纯逻辑）。对应设计 2026-06-23-trade-history-stats.md。"""
 import unittest
 
-from option_bot.persistence.stats import (equity_curve, filter_by_close_ts,
-                                          pair_round_trips, summarize)
+from option_bot.persistence.stats import (downsample, equity_curve,
+                                          filter_by_close_ts, pair_round_trips,
+                                          summarize)
+
+
+class TestDownsample(unittest.TestCase):
+    def test_no_downsample_when_small(self):
+        rows = [{'ts': i} for i in range(10)]
+        self.assertEqual(downsample(rows, 1000), rows)
+
+    def test_downsamples_and_keeps_last(self):
+        rows = [{'ts': i} for i in range(5000)]
+        out = downsample(rows, 1000)
+        self.assertLessEqual(len(out), 1001)
+        self.assertEqual(out[-1]['ts'], 4999)  # 始终保留最后一点
 
 
 def tr(action, price, ts, ident='X', acc='a', qty=1, pnl=None, sym='QQQ', direction='LONG'):

@@ -204,7 +204,7 @@ def build_bot_from_env(env_get=os.environ.get):
     md, td = MarketDataAdapter(qc), TradingAdapter(tc, account)
 
     repo = SqliteRepo(env_get('OBOT_DB_FILE') or 'data/option_bot.db')
-    sink = SqliteSink(repo)
+    sink = SqliteSink(repo, tick_retention_days=_i(env_get('OBOT_TICK_RETENTION_DAYS'), 7))
     store = StateStore(env_get('OBOT_STATE_FILE') or 'data/option_bot_state.json')
     sm = PositionStateMachine(td, md, store, cfg, sink=sink)
     loop = MonitorLoop(sm, MarketClock(md, cfg), RiskGuard(cfg), cfg)
