@@ -15,6 +15,9 @@
   .dot { width:10px; height:10px; border-radius:50%; display:inline-block; }
   .alive { background:#4caf50; } .dead { background:#ef5350; }
   .muted { color:#8a909c; font-size:12px; }
+  .hist-form { margin:8px 0; display:flex; gap:12px; flex-wrap:wrap; align-items:center; font-size:13px; }
+  .hist-form input, .hist-form select { background:#1a1e27; color:#e6e6e6; border:1px solid #2a2f3a; padding:3px; }
+  button { background:#2a6; color:#fff; border:0; padding:5px 12px; border-radius:4px; cursor:pointer; }
 </style>
 </head>
 <body>
@@ -40,6 +43,25 @@
       <th>数量</th><th>价格</th><th class="l">原因</th><th>平仓盈亏%</th>
     </tr></thead>
     <tbody id="tradeBody"><tr><td class="l muted" colspan="8">加载中…</td></tr></tbody>
+  </table>
+
+  <h2>历史统计（已平仓，美东时区）</h2>
+  <div class="hist-form">
+    <label>从 <input type="date" id="hFrom"></label>
+    <label>到 <input type="date" id="hTo"></label>
+    <label>账户 <input id="hAccount" placeholder="留空=全部" size="10"></label>
+    <label>标识 <select id="hIdent"><option value="">全部</option></select></label>
+    <button onclick="loadIdentifiers()">刷新标识</button>
+    <button onclick="loadHistory()">查询</button>
+  </div>
+  <div id="histSummary" class="muted">选时间范围 → 刷新标识 → 查询</div>
+  <svg id="equity" width="100%" height="120" style="background:#1a1e27;border:1px solid #2a2f3a;margin:8px 0;display:block"></svg>
+  <table>
+    <thead><tr>
+      <th class="l">平仓时间</th><th class="l">标识</th><th class="l">方向</th><th>数量</th>
+      <th>开仓价</th><th>平仓价</th><th class="l">原因</th><th>盈亏%</th><th>盈亏$</th>
+    </tr></thead>
+    <tbody id="histBody"><tr><td class="l muted" colspan="9">—</td></tr></tbody>
   </table>
 
 <script>
@@ -86,6 +108,57 @@ async function refresh() {
 }
 refresh();
 setInterval(refresh, 3000);
+
+// ---------- 历史统计 ----------
+function q(id){ return document.getElementById(id); }
+function amtCell(v){ if(v===null||v===undefined) return '<td></td>'; const c=v>=0?'pos':'neg'; return '<td class="'+c+'">'+(v>=0?'+':'')+'$'+v.toFixed(2)+'</td>'; }
+function histParams(withIdent){
+  const p = new URLSearchParams();
+  if(q('hFrom').value) p.set('from', q('hFrom').value);
+  if(q('hTo').value) p.set('to', q('hTo').value);
+  if(q('hAccount').value) p.set('account', q('hAccount').value);
+  if(withIdent && q('hIdent').value) p.set('identifier', q('hIdent').value);
+  return p;
+}
+async function loadIdentifiers(){
+  try{
+    const list = await fetch('/api/history/identifiers?'+histParams(false)).then(r=>r.json());
+    const sel = q('hIdent'), cur = sel.value;
+    sel.innerHTML = '<option value="">全部</option>' + (Array.isArray(list)?list:[]).map(x=>
+      '<option value="'+x.identifier+'">'+x.identifier+' ('+x.symbol+', '+x.n+'笔)</option>').join('');
+    sel.value = cur;
+  }catch(e){}
+}
+function drawEquity(curve){
+  const svg=q('equity'), W=svg.clientWidth||600, H=120, pad=10;
+  if(!curve || !curve.length){ svg.innerHTML=''; return; }
+  const xs=curve.map(p=>p.ts), ys=curve.map(p=>p.cum_pnl);
+  const xmin=Math.min(...xs), xmax=Math.max(...xs), ymin=Math.min(0,...ys), ymax=Math.max(0,...ys);
+  const sx=t=> pad + (xmax===xmin?0:(t-xmin)/(xmax-xmin))*(W-2*pad);
+  const sy=v=> H-pad - (ymax===ymin?0:(v-ymin)/(ymax-ymin))*(H-2*pad);
+  const pts=curve.map(p=>sx(p.ts).toFixed(1)+','+sy(p.cum_pnl).toFixed(1)).join(' ');
+  const zero=sy(0).toFixed(1), last=ys[ys.length-1];
+  svg.innerHTML='<line x1="0" y1="'+zero+'" x2="'+W+'" y2="'+zero+'" stroke="#3a3f4a"/>'+
+    '<polyline points="'+pts+'" fill="none" stroke="'+(last>=0?'#4caf50':'#ef5350')+'" stroke-width="2"/>';
+}
+async function loadHistory(){
+  try{
+    const d = await fetch('/api/history?'+histParams(true)).then(r=>r.json());
+    const s = d.summary||{}, tot = s.total_pnl_amount||0;
+    q('histSummary').innerHTML =
+      '总盈亏 <b class="'+(tot>=0?'pos':'neg')+'">'+(tot>=0?'+':'')+'$'+tot.toFixed(2)+'</b> · 胜率 '+
+      ((s.win_rate||0)*100).toFixed(1)+'% · 笔数 '+(s.count||0)+'(赢'+(s.wins||0)+'/亏'+(s.losses||0)+
+      ') · 平均 '+(s.avg_pnl_percent||0).toFixed(1)+'% · 最大盈 $'+(s.max_win||0).toFixed(0)+
+      ' / 最大亏 $'+(s.max_loss||0).toFixed(0);
+    drawEquity(d.equity_curve);
+    q('histBody').innerHTML = (d.trades && d.trades.length) ? d.trades.map(t=>
+      '<tr><td class="l">'+ts(t.close_ts)+'</td><td class="l">'+t.identifier+'</td><td class="l">'+t.direction+
+      '</td><td>'+fmt(t.qty,0)+'</td><td>'+fmt(t.open_price,2)+'</td><td>'+fmt(t.close_price,2)+
+      '</td><td class="l">'+(t.reason||'')+'</td>'+pctCell(t.pnl_percent)+amtCell(t.pnl_amount)+'</tr>'
+    ).join('') : '<tr><td class="l muted" colspan="9">无记录</td></tr>';
+  }catch(e){ q('histSummary').textContent='查询失败'; }
+}
+(function(){ const t=new Date().toISOString().slice(0,10); q('hTo').value=t; q('hFrom').value=t; loadIdentifiers(); })();
 </script>
 </body>
 </html>

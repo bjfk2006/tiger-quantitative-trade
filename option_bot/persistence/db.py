@@ -91,6 +91,46 @@ class SqliteRepo:
                 (limit,)).fetchall()
         return [dict(r) for r in rows]
 
+    def list_trades_in_range(self, account=None, identifier=None,
+                             start_ts=None, end_ts=None):
+        """按 account/identifier/时间区间查 trades（升序）。供历史统计配对用。
+
+        注意：配对需要完整 OPEN，调用方通常不传 ts 过滤（在配对后按 close_ts 过滤）。
+        """
+        q = 'SELECT * FROM trades WHERE 1=1'
+        args = []
+        if account:
+            q += ' AND account=?'; args.append(account)
+        if identifier:
+            q += ' AND identifier=?'; args.append(identifier)
+        if start_ts is not None:
+            q += ' AND ts>=?'; args.append(start_ts)
+        if end_ts is not None:
+            q += ' AND ts<?'; args.append(end_ts)
+        q += ' ORDER BY ts ASC, id ASC'
+        with closing(self._conn()) as conn:
+            rows = conn.execute(q, args).fetchall()
+        return [dict(r) for r in rows]
+
+    def distinct_identifiers_in_range(self, account=None, start_ts=None, end_ts=None):
+        """区间内有 CLOSE 的标识，GROUP BY 返回 identifier/symbol/account/笔数/最近时间。
+
+        用于填充看板的标识下拉列表。
+        """
+        q = ('SELECT identifier, symbol, account, COUNT(*) AS n, MAX(ts) AS last_ts '
+             "FROM trades WHERE action='CLOSE'")
+        args = []
+        if account:
+            q += ' AND account=?'; args.append(account)
+        if start_ts is not None:
+            q += ' AND ts>=?'; args.append(start_ts)
+        if end_ts is not None:
+            q += ' AND ts<?'; args.append(end_ts)
+        q += ' GROUP BY identifier, symbol, account ORDER BY last_ts DESC'
+        with closing(self._conn()) as conn:
+            rows = conn.execute(q, args).fetchall()
+        return [dict(r) for r in rows]
+
     # ---------- positions ----------
     def upsert_position(self, identifier, account, symbol, direction, qty=None,
                         entry_price=None, market_price=None, unrealized_pnl=None,
