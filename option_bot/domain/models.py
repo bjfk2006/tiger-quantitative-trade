@@ -37,6 +37,8 @@ class CloseReason(Enum):
     STOP_LOSS = 'STOP_LOSS'
     TIME_FORCE_CLOSE = 'TIME_FORCE_CLOSE'
     TRAILING_STOP = 'TRAILING_STOP'   # 移动止盈/回撤保护触发
+    BREAKEVEN = 'BREAKEVEN'           # 保本止损（盈利回吐到保本线）触发
+    TIME_IN_TRADE = 'TIME_IN_TRADE'   # 持仓时长上限触发
     MANUAL = 'MANUAL'
 
 
@@ -82,6 +84,11 @@ class StrategyConfig:
     strategy_name: str = 'threshold'
     trail_activation: float = 20.0    # trailing 武装阈值（+%）
     trail_giveback: float = 10.0      # trailing 从峰值回撤多少个点即平仓
+    # breakeven（保本止损）：盈利冲过 activation% 后，回吐到 lock% 即平（0=保本点）
+    breakeven_activation: float = 0.0  # 0=该组件关闭（bracket 用；standalone 会回退默认）
+    breakeven_lock: float = 0.0
+    # 持仓时长上限（分钟）：0=关闭
+    max_hold_minutes: float = 0.0
     poll_interval: float = 2.0        # 监控轮询间隔（秒）
     near_close_poll_interval: float = 5.0  # 临近收盘窗口收紧后的最大间隔（秒）
     max_qty: int = 1                  # 单笔最大数量上限

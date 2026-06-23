@@ -3,14 +3,18 @@
 import unittest
 
 from option_bot.domain.models import CloseReason, StrategyConfig
-from option_bot.strategy.close_strategies import (StrategyContext,
+from option_bot.strategy.close_strategies import (BracketStrategy,
+                                                  BreakevenStrategy,
+                                                  StrategyContext,
                                                   ThresholdStrategy,
+                                                  TimeInTradeStrategy,
                                                   TrailingStrategy,
                                                   build_strategy)
 
 
-def ctx(pnl, mtc=None):
-    return StrategyContext(pnl_percent=pnl, minutes_to_close=mtc)
+def ctx(pnl, mtc=None, opened_at=None, now_ts=None):
+    return StrategyContext(pnl_percent=pnl, minutes_to_close=mtc,
+                           opened_at=opened_at, now_ts=now_ts)
 
 
 class TestThreshold(unittest.TestCase):
@@ -80,6 +84,87 @@ class TestTrailing(unittest.TestCase):
         self.assertEqual(s2.peak, 25)
         # 恢复后继续：回撤达标即平
         self.assertEqual(s2.decide(ctx(15, 100)), CloseReason.TRAILING_STOP)
+
+
+class TestBreakeven(unittest.TestCase):
+    def setUp(self):
+        # 冲过 +20% 武装；回吐到 +5%(lock) 即平
+        self.s = BreakevenStrategy(close_buffer_minutes=5, sl_percent=50,
+                                   activation=20, lock=5)
+
+    def test_not_armed_no_exit(self):
+        self.assertIsNone(self.s.decide(ctx(8, 100)))   # 没到武装，回到8也不触发保本
+        self.assertFalse(self.s.armed)
+
+    def test_arm_then_lock_exit(self):
+        self.assertIsNone(self.s.decide(ctx(25, 100)))  # 武装
+        self.assertTrue(self.s.armed)
+        self.assertEqual(self.s.decide(ctx(5, 100)), CloseReason.BREAKEVEN)  # 回吐到 lock
+
+    def test_hard_stop_before_arm(self):
+        self.assertEqual(self.s.decide(ctx(-50, 100)), CloseReason.STOP_LOSS)
+
+    def test_state_roundtrip(self):
+        self.s.decide(ctx(22, 100))
+        s2 = BreakevenStrategy(5, 50, 20, 5)
+        s2.load_state(self.s.state())
+        self.assertTrue(s2.armed)
+        self.assertEqual(s2.decide(ctx(4, 100)), CloseReason.BREAKEVEN)
+
+
+class TestTimeInTrade(unittest.TestCase):
+    def test_exit_after_max_hold(self):
+        s = TimeInTradeStrategy(close_buffer_minutes=5, sl_percent=50, max_hold_minutes=30)
+        # 持有 10 分钟 -> 不平
+        self.assertIsNone(s.decide(ctx(5, 100, opened_at=0, now_ts=10 * 60000)))
+        # 持有 30 分钟 -> 平
+        self.assertEqual(s.decide(ctx(5, 100, opened_at=0, now_ts=30 * 60000)),
+                         CloseReason.TIME_IN_TRADE)
+
+    def test_safety_still_works(self):
+        s = TimeInTradeStrategy(5, 50, 30)
+        self.assertEqual(s.decide(ctx(-60, 100, opened_at=0, now_ts=0)), CloseReason.STOP_LOSS)
+
+
+class TestBracket(unittest.TestCase):
+    def test_priority_breakeven_over_trailing_and_tp(self):
+        # 保本+移动止盈+固定止盈 同时配置；保本优先级最高
+        s = BracketStrategy(close_buffer_minutes=5, sl_percent=50, tp_percent=40,
+                            breakeven_activation=20, breakeven_lock=5,
+                            trail_activation=20, trail_giveback=10, max_hold_minutes=0)
+        s.decide(ctx(30, 100))   # 两者都武装, peak=30
+        # 回到 5：保本(≤5)与移动止盈(≤30-10=20)都满足 → 保本优先
+        self.assertEqual(s.decide(ctx(5, 100)), CloseReason.BREAKEVEN)
+
+    def test_trailing_then_tp(self):
+        s = BracketStrategy(5, 50, tp_percent=40, breakeven_activation=0, breakeven_lock=0,
+                            trail_activation=20, trail_giveback=10, max_hold_minutes=0)
+        s.decide(ctx(30, 100))  # trailing 武装 peak=30
+        self.assertEqual(s.decide(ctx(20, 100)), CloseReason.TRAILING_STOP)  # 30-10
+        s2 = BracketStrategy(5, 50, 40, 0, 0, 20, 10, 0)
+        self.assertEqual(s2.decide(ctx(40, 100)), CloseReason.TAKE_PROFIT)   # 直接到止盈
+
+    def test_components_disabled_when_zero(self):
+        # 全部盈利组件关闭 → 只剩硬止损/时间强平
+        s = BracketStrategy(5, 50, tp_percent=0, breakeven_activation=0, breakeven_lock=0,
+                            trail_activation=0, trail_giveback=10, max_hold_minutes=0)
+        self.assertIsNone(s.decide(ctx(100, 100)))          # 涨到100也不平(无止盈组件)
+        self.assertEqual(s.decide(ctx(-50, 100)), CloseReason.STOP_LOSS)
+        self.assertEqual(s.decide(ctx(0, 3)), CloseReason.TIME_FORCE_CLOSE)
+
+    def test_time_in_trade_component(self):
+        s = BracketStrategy(5, 50, tp_percent=0, breakeven_activation=0, breakeven_lock=0,
+                            trail_activation=0, trail_giveback=10, max_hold_minutes=30)
+        self.assertEqual(s.decide(ctx(5, 100, opened_at=0, now_ts=30 * 60000)),
+                         CloseReason.TIME_IN_TRADE)
+
+    def test_state_roundtrip(self):
+        s = BracketStrategy(5, 50, 40, 20, 5, 20, 10, 0)
+        s.decide(ctx(33, 100))
+        s2 = BracketStrategy(5, 50, 40, 20, 5, 20, 10, 0)
+        s2.load_state(s.state())
+        self.assertTrue(s2.trail_armed)
+        self.assertEqual(s2.peak, 33)
 
 
 class TestBuild(unittest.TestCase):

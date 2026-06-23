@@ -188,6 +188,7 @@ class PositionStateMachine:
         """委托当前策略判断是否平仓；每 tick 持久化策略状态（崩溃可恢复）。"""
         if self._strategy is None:
             return None
+        ctx.opened_at = self._opened_at   # 注入开仓时间(权威来源, resume 后仍正确)
         reason = self._strategy.decide(ctx)
         try:
             self._save()  # 持久化最新策略状态(trailing 峰值等)

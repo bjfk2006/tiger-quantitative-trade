@@ -110,12 +110,20 @@ def chain_cmd(ctx, symbol, expiry, direction):
 @click.option('--max-qty', default=1, type=int, help='单笔数量上限')
 @click.option('--max-spread', 'max_spread_pct', default=5.0, type=float,
               help='市价单允许的最大相对点差%(超过则拒单防滑点；流动性差/盘前可调大)')
-@click.option('--strategy', 'strategy_name', type=click.Choice(['threshold', 'trailing']),
-              default='threshold', help='平仓策略：threshold(固定止盈) / trailing(移动止盈)')
+@click.option('--strategy', 'strategy_name',
+              type=click.Choice(['threshold', 'trailing', 'breakeven', 'time_in_trade', 'bracket']),
+              default='threshold',
+              help='平仓策略：threshold/trailing/breakeven/time_in_trade/bracket(可组合)')
 @click.option('--trail-activation', default=20.0, type=float,
-              help='trailing 武装阈值%(涨破即开始移动止盈)')
+              help='trailing/bracket 移动止盈武装阈值%')
 @click.option('--trail-giveback', default=10.0, type=float,
-              help='trailing 从峰值回撤多少个点即平仓锁盈')
+              help='trailing/bracket 从峰值回撤多少个点即平仓锁盈')
+@click.option('--breakeven-activation', default=0.0, type=float,
+              help='breakeven/bracket 保本武装阈值%(bracket 中 0=关闭)')
+@click.option('--breakeven-lock', default=0.0, type=float,
+              help='保本平仓线%(0=成本价)')
+@click.option('--max-hold-minutes', default=0.0, type=float,
+              help='持仓时长上限(分钟)；bracket 中 0=关闭')
 @click.option('--enable-open/--no-enable-open', 'enable_open', default=True,
               help='是否允许开新仓（kill switch：--no-enable-open 只盯盘/平仓不开仓）')
 @click.option('--early-close-file', default=None,
@@ -126,7 +134,8 @@ def chain_cmd(ctx, symbol, expiry, direction):
 @click.pass_context
 def run_cmd(ctx, symbol, direction, expiry, strike, qty, tp_percent, sl_percent,
             close_buffer_minutes, poll_interval, max_qty, max_spread_pct,
-            strategy_name, trail_activation, trail_giveback, enable_open,
+            strategy_name, trail_activation, trail_giveback,
+            breakeven_activation, breakeven_lock, max_hold_minutes, enable_open,
             early_close_file, state_file, db_file, yes):
     """开仓并自动盯盘平仓。"""
     log = logging.getLogger('option_bot.cli')
@@ -141,7 +150,8 @@ def run_cmd(ctx, symbol, direction, expiry, strike, qty, tp_percent, sl_percent,
             close_buffer_minutes=close_buffer_minutes, poll_interval=poll_interval,
             max_qty=max_qty, max_spread_pct=max_spread_pct,
             strategy_name=strategy_name, trail_activation=trail_activation,
-            trail_giveback=trail_giveback,
+            trail_giveback=trail_giveback, breakeven_activation=breakeven_activation,
+            breakeven_lock=breakeven_lock, max_hold_minutes=max_hold_minutes,
             enable_open=enable_open, early_close_dates=early_close,
         )
 

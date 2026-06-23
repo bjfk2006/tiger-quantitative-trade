@@ -20,6 +20,7 @@ class StrategyContext:
     market_price: Optional[float] = None
     entry_price: Optional[float] = None
     now_ts: Optional[int] = None
+    opened_at: Optional[int] = None    # 开仓时间(ms)，由状态机注入；time_in_trade 用
 
 
 class CloseStrategy(ABC):
@@ -114,18 +115,129 @@ class TrailingStrategy(BaseCloseStrategy):
             self.peak = d.get('peak')
 
 
+class BreakevenStrategy(BaseCloseStrategy):
+    """保本止损：盈利冲过 activation% 后武装；之后回吐到 lock%（0=成本价）即平，锁住已有利润。"""
+    name = 'breakeven'
+
+    def __init__(self, close_buffer_minutes, sl_percent, activation, lock):
+        super().__init__(close_buffer_minutes, sl_percent)
+        self.activation = activation
+        self.lock = lock
+        self.armed = False
+
+    def profit_decide(self, ctx):
+        pnl = ctx.pnl_percent
+        if not self.armed and pnl >= self.activation:
+            self.armed = True
+        if self.armed and pnl <= self.lock:
+            return CloseReason.BREAKEVEN
+        return None
+
+    def state(self):
+        return {'armed': self.armed}
+
+    def load_state(self, d):
+        if d:
+            self.armed = bool(d.get('armed', False))
+
+
+class TimeInTradeStrategy(BaseCloseStrategy):
+    """持仓时长上限：持仓超过 max_hold_minutes 即平（theta 兜底）。无状态(用 ctx.opened_at)。"""
+    name = 'time_in_trade'
+
+    def __init__(self, close_buffer_minutes, sl_percent, max_hold_minutes):
+        super().__init__(close_buffer_minutes, sl_percent)
+        self.max_hold_minutes = max_hold_minutes
+
+    def profit_decide(self, ctx):
+        if (self.max_hold_minutes and ctx.opened_at is not None
+                and ctx.now_ts is not None):
+            held_min = (ctx.now_ts - ctx.opened_at) / 60000.0
+            if held_min >= self.max_hold_minutes:
+                return CloseReason.TIME_IN_TRADE
+        return None
+
+
+class BracketStrategy(BaseCloseStrategy):
+    """可组合括弧：硬止损+时间强平(基类) + 保本/移动止盈/固定止盈/时长 任意开关。
+
+    每个组件「值>0 即启用」。两阶段：先更新所有有状态子规则，再按优先级判触发：
+    ③保本 > ④移动止盈 > ⑤固定止盈 > ⑥时长。动作均为整仓平，第一个命中胜出。
+    """
+    name = 'bracket'
+
+    def __init__(self, close_buffer_minutes, sl_percent, tp_percent,
+                 breakeven_activation, breakeven_lock,
+                 trail_activation, trail_giveback, max_hold_minutes):
+        super().__init__(close_buffer_minutes, sl_percent)
+        self.tp_percent = tp_percent
+        self.be_activation = breakeven_activation
+        self.be_lock = breakeven_lock
+        self.trail_activation = trail_activation
+        self.trail_giveback = trail_giveback
+        self.max_hold_minutes = max_hold_minutes
+        self.be_armed = False
+        self.trail_armed = False
+        self.peak = None
+
+    def profit_decide(self, ctx):
+        pnl = ctx.pnl_percent
+        # 阶段1：更新所有有状态子规则（不管是否触发）
+        if self.be_activation > 0 and not self.be_armed and pnl >= self.be_activation:
+            self.be_armed = True
+        if self.trail_activation > 0:
+            if not self.trail_armed and pnl >= self.trail_activation:
+                self.trail_armed = True
+                self.peak = pnl
+            elif self.trail_armed and (self.peak is None or pnl > self.peak):
+                self.peak = pnl
+        # 阶段2：按优先级判触发
+        if self.be_activation > 0 and self.be_armed and pnl <= self.be_lock:
+            return CloseReason.BREAKEVEN
+        if self.trail_armed and pnl <= self.peak - self.trail_giveback:
+            return CloseReason.TRAILING_STOP
+        if self.tp_percent > 0 and pnl >= self.tp_percent:
+            return CloseReason.TAKE_PROFIT
+        if (self.max_hold_minutes > 0 and ctx.opened_at is not None
+                and ctx.now_ts is not None):
+            if (ctx.now_ts - ctx.opened_at) / 60000.0 >= self.max_hold_minutes:
+                return CloseReason.TIME_IN_TRADE
+        return None
+
+    def state(self):
+        return {'be_armed': self.be_armed, 'trail_armed': self.trail_armed, 'peak': self.peak}
+
+    def load_state(self, d):
+        if d:
+            self.be_armed = bool(d.get('be_armed', False))
+            self.trail_armed = bool(d.get('trail_armed', False))
+            self.peak = d.get('peak')
+
+
 STRATEGY_REGISTRY = {
     'threshold': ThresholdStrategy,
     'trailing': TrailingStrategy,
+    'breakeven': BreakevenStrategy,
+    'time_in_trade': TimeInTradeStrategy,
+    'bracket': BracketStrategy,
 }
 
 
 def build_strategy(name, cfg) -> CloseStrategy:
     """按名称 + StrategyConfig 构建策略。未知名抛错。"""
     name = (name or 'threshold').lower()
+    cb, sl = cfg.close_buffer_minutes, cfg.sl_percent
     if name == 'threshold':
-        return ThresholdStrategy(cfg.close_buffer_minutes, cfg.sl_percent, cfg.tp_percent)
+        return ThresholdStrategy(cb, sl, cfg.tp_percent)
     if name == 'trailing':
-        return TrailingStrategy(cfg.close_buffer_minutes, cfg.sl_percent,
-                                cfg.trail_activation, cfg.trail_giveback)
+        return TrailingStrategy(cb, sl, cfg.trail_activation, cfg.trail_giveback)
+    if name == 'breakeven':
+        # standalone 时若未配 activation 则回退默认 20
+        return BreakevenStrategy(cb, sl, cfg.breakeven_activation or 20.0, cfg.breakeven_lock)
+    if name == 'time_in_trade':
+        return TimeInTradeStrategy(cb, sl, cfg.max_hold_minutes or 60.0)
+    if name == 'bracket':
+        return BracketStrategy(cb, sl, cfg.tp_percent, cfg.breakeven_activation,
+                               cfg.breakeven_lock, cfg.trail_activation,
+                               cfg.trail_giveback, cfg.max_hold_minutes)
     raise ValueError(f'未知平仓策略: {name}（可选: {list(STRATEGY_REGISTRY)}）')

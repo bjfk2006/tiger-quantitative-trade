@@ -198,6 +198,9 @@ def build_bot_from_env(env_get=os.environ.get):
         strategy_name=env_get('OBOT_STRATEGY') or 'threshold',
         trail_activation=_f(env_get('OBOT_TRAIL_ACTIVATION'), 20.0),
         trail_giveback=_f(env_get('OBOT_TRAIL_GIVEBACK'), 10.0),
+        breakeven_activation=_f(env_get('OBOT_BREAKEVEN_ACTIVATION'), 0.0),
+        breakeven_lock=_f(env_get('OBOT_BREAKEVEN_LOCK'), 0.0),
+        max_hold_minutes=_f(env_get('OBOT_MAX_HOLD_MINUTES'), 0.0),
         early_close_dates=_load_json(env_get('OBOT_EARLY_CLOSE_FILE')),
     )
     config = load_client_config_from_env(props_path=env_get('TIGEROPEN_PROPS_PATH'))
