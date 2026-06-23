@@ -89,6 +89,13 @@ class StrategyConfig:
     breakeven_lock: float = 0.0
     # 持仓时长上限（分钟）：0=关闭
     max_hold_minutes: float = 0.0
+    # ---- 双向跨式(straddle)多腿模式 ----
+    mode: str = 'single'              # single（单腿）/ straddle（call+put 双腿）
+    leg_stop: float = 10.0            # 单腿止损%（亏到即平该腿）
+    straddle_tp_mode: str = 'trailing'  # 组合止盈：fixed / trailing
+    straddle_tp: float = 10.0         # fixed：组合止盈%（总成本占比）
+    straddle_trail_activation: float = 10.0  # trailing：组合武装阈值%
+    straddle_trail_giveback: float = 10.0    # trailing：组合从峰值回撤%
     poll_interval: float = 2.0        # 监控轮询间隔（秒）
     near_close_poll_interval: float = 5.0  # 临近收盘窗口收紧后的最大间隔（秒）
     max_qty: int = 1                  # 单笔最大数量上限
@@ -142,5 +149,42 @@ class TradeSnapshot:
     @classmethod
     def from_dict(cls, d: dict) -> 'TradeSnapshot':
         # 忽略未知字段，向后兼容快照结构演进
+        valid = cls.__dataclass_fields__.keys()
+        return cls(**{k: v for k, v in d.items() if k in valid})
+
+
+@dataclass
+class StraddleLeg:
+    """跨式的一条腿（call 或 put）。"""
+    identifier: str
+    put_call: str
+    qty: int
+    entry_price: Optional[float] = None
+    open_order_id: Optional[int] = None
+    closed: bool = False
+    realized_pnl: float = 0.0          # 平腿时记 (close-entry)*qty*100
+
+
+@dataclass
+class StraddleSnapshot:
+    """跨式多腿崩溃恢复快照。"""
+    account: str
+    symbol: str
+    expiry: str
+    strike: float
+    qty: int
+    legs: list                         # [StraddleLeg.__dict__, ...]
+    state: str
+    opened_at: Optional[int]
+    external_id: Optional[str]
+    tp_mode: str = 'trailing'
+    combo_armed: bool = False
+    combo_peak: Optional[float] = None
+
+    def to_dict(self) -> dict:
+        return asdict(self)
+
+    @classmethod
+    def from_dict(cls, d: dict) -> 'StraddleSnapshot':
         valid = cls.__dataclass_fields__.keys()
         return cls(**{k: v for k, v in d.items() if k in valid})

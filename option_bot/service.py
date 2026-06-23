@@ -201,6 +201,12 @@ def build_bot_from_env(env_get=os.environ.get):
         breakeven_activation=_f(env_get('OBOT_BREAKEVEN_ACTIVATION'), 0.0),
         breakeven_lock=_f(env_get('OBOT_BREAKEVEN_LOCK'), 0.0),
         max_hold_minutes=_f(env_get('OBOT_MAX_HOLD_MINUTES'), 0.0),
+        mode=env_get('OBOT_MODE') or 'single',
+        leg_stop=_f(env_get('OBOT_STRADDLE_LEG_STOP'), 10.0),
+        straddle_tp_mode=env_get('OBOT_STRADDLE_TP_MODE') or 'trailing',
+        straddle_tp=_f(env_get('OBOT_STRADDLE_TP'), 10.0),
+        straddle_trail_activation=_f(env_get('OBOT_STRADDLE_TRAIL_ACTIVATION'), 10.0),
+        straddle_trail_giveback=_f(env_get('OBOT_STRADDLE_TRAIL_GIVEBACK'), 10.0),
         early_close_dates=_load_json(env_get('OBOT_EARLY_CLOSE_FILE')),
     )
     config = load_client_config_from_env(props_path=env_get('TIGEROPEN_PROPS_PATH'))
@@ -210,10 +216,27 @@ def build_bot_from_env(env_get=os.environ.get):
 
     repo = SqliteRepo(env_get('OBOT_DB_FILE') or 'data/option_bot.db')
     sink = SqliteSink(repo, tick_retention_days=_i(env_get('OBOT_TICK_RETENTION_DAYS'), 7))
-    store = StateStore(env_get('OBOT_STATE_FILE') or 'data/option_bot_state.json')
+    state_file = env_get('OBOT_STATE_FILE') or 'data/option_bot_state.json'
+    cmd_queue = CommandQueue()
+
+    # ---- 跨式(straddle)多腿模式 ----
+    if (cfg.mode or 'single').lower() == 'straddle':
+        from option_bot.strategy.straddle import StraddleManager, StraddleSupervisor
+        straddle_state = state_file.rsplit('.json', 1)[0] + '_straddle.json'
+        mgr = StraddleManager(td, md, cfg, MarketClock(md, cfg), straddle_state, sink=sink)
+        s_open = None
+        if _b(env_get('OBOT_OPEN_ON_START')):
+            s_open = {'symbol': env_get('OBOT_SYMBOL'), 'expiry': env_get('OBOT_EXPIRY'),
+                      'strike': _f(env_get('OBOT_STRIKE'), None), 'qty': _i(env_get('OBOT_QTY'), 1)}
+        sup = StraddleSupervisor(mgr, cfg, cmd_queue, open_spec=s_open,
+                                 allow_live_open=_b(env_get('OBOT_ALLOW_LIVE_AUTO_OPEN')),
+                                 is_paper=config.is_paper)
+        return sup, repo, cmd_queue
+
+    # ---- 单腿模式（默认）----
+    store = StateStore(state_file)
     sm = PositionStateMachine(td, md, store, cfg, sink=sink)
     loop = MonitorLoop(sm, MarketClock(md, cfg), cfg)
-    cmd_queue = CommandQueue()
 
     open_spec = None
     if _b(env_get('OBOT_OPEN_ON_START')):

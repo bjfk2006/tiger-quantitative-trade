@@ -54,30 +54,33 @@ class MarketDataAdapter:
             return None
         return df.iloc[0].to_dict()
 
-    def resolve_pick(self, symbol, expiry, strike, direction, market=Market.US):
-        """从期权链定位用户/服务选定的单腿期权，返回 OptionPick。
+    def resolve_option(self, symbol, expiry, strike, put_call, market=Market.US):
+        """按 symbol/到期/行权价/方向(CALL|PUT) 定位单个期权，返回 OptionPick。
 
-        :param direction: domain.models.Direction（LONG→CALL / SHORT→PUT）
         :param expiry: 'YYYY-MM-DD'（链查询用）；OptionPick.expiry 归一化为 'YYYYMMDD'
         """
-        put_call = direction.put_call
-        rows = self.get_chain(symbol, expiry, put_call=put_call, market=market)
+        pc = str(put_call).upper()
+        rows = self.get_chain(symbol, expiry, put_call=pc, market=market)
         for r in rows:
             try:
                 same_strike = abs(float(r.get('strike')) - float(strike)) < 1e-6
             except (TypeError, ValueError):
                 continue
-            if same_strike and str(r.get('put_call')).upper() == put_call:
+            if same_strike and str(r.get('put_call')).upper() == pc:
                 return OptionPick(
                     symbol=symbol,
                     expiry=str(expiry).replace('-', '').strip(),
                     strike=float(r.get('strike')),
-                    put_call=put_call,
+                    put_call=pc,
                     identifier=str(r.get('identifier')).strip(),
                     multiplier=int(r.get('multiplier') or 100),
                 )
         raise DataUnavailable(
-            f'未在 {symbol} {expiry} {put_call} 链中找到行权价 {strike} 的期权')
+            f'未在 {symbol} {expiry} {pc} 链中找到行权价 {strike} 的期权')
+
+    def resolve_pick(self, symbol, expiry, strike, direction, market=Market.US):
+        """单腿入口：按 Direction（LONG→CALL / SHORT→PUT）定位。"""
+        return self.resolve_option(symbol, expiry, strike, direction.put_call, market)
 
     def is_market_trading(self, market='US'):
         """券商侧市场状态判断：是否处于 RTH 交易中。"""
