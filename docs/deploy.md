@@ -538,3 +538,18 @@ cd /data1/dolt/options && HOME=/root dolt sql -q \
   where act_symbol='AMD' and call_put='Call' and date between '2026-01-02' and '2026-06-23' \
   group by expiration,strike order by n desc limit 5"
 ```
+
+### 17.1 滚动 ATM 批量回测（衡量策略本身）
+
+每个交易日按**当日现价**选近月平值合约入场（联用 `stocks` 现价 + `options` 链），跑同一策略到退出，汇总全样本胜率/盈亏。需要 `/data1/dolt/stocks` 与 `/data1/dolt/options` 都在。
+
+```bash
+cd /root/tiger-quantitative-trade
+sudo HOME=/root python3 -m option_bot.backtest --symbol AMD --put-call Call \
+  --from 2026-01-15 --to 2026-05-15 --rolling-atm --target-dte 30 \
+  --strategy trailing --trail-activation 20 --trail-giveback 10 \
+  --trail-relative-ratio 20 --trail-relative-threshold 50 --sl 50
+```
+选合约：DTE 最接近 `--target-dte`(默认30，`--min-dte` 默认3) 的到期；该到期下 `|行权价−现价|` 最小者为 ATM。`--step-days` 控入场节奏，`--put-call Put` 测看跌，`--json` 出明细。
+
+> ⚠️ 解读注意：① 仍是**日线近似**（盘中 trailing/强平不可复现）；② 「每个交易日都买 ATM」是激进取样，且单一标的若处于大牛/大熊单边行情，均值会被严重带偏（非策略普适表现）；③ **不含 SPCX**（无期权）。回测结论仅供参考，不等于实盘。
