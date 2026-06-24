@@ -20,6 +20,10 @@ def _to_ms(date_str: str) -> int:
     return int(d.replace(tzinfo=datetime.timezone.utc).timestamp() * 1000)
 
 
+def _date(s: str) -> datetime.date:
+    return datetime.datetime.strptime(s[:10], '%Y-%m-%d').date()
+
+
 def _fill_price(row: dict, fill: str) -> Optional[float]:
     bid, ask = row.get('bid'), row.get('ask')
     if fill == 'mid':
@@ -111,6 +115,57 @@ def run_batch(series: List[dict], cfg, strategy_name: str, fill: str = 'ask') ->
         if res is not None and res.entry_date == r['date']:
             results.append(res)
     return {'results': results, 'summary': summarize(results)}
+
+
+def run_rolling_atm(closes: dict, chain_rows: List[dict], cfg, strategy_name: str,
+                    target_dte: int = 30, min_dte: int = 3, step_days: int = 1,
+                    fill: str = 'ask') -> dict:
+    """滚动 ATM 批量：每个交易日按现价选近月平值合约入场，跑策略到退出，汇总。
+
+    closes: {date: close}（stocks）；chain_rows: [{date,expiration,strike,bid,ask}]（options）。
+    选合约：DTE≥min_dte 的到期中取 DTE 最接近 target_dte（并列取较小）；该到期下 |strike−spot| 最小为 ATM。
+    返回 {results:[BacktestResult], metas:[{expiration,strike,spot,dte}], summary}。
+    """
+    by_date = {}
+    series_by_contract = {}
+    for r in chain_rows:
+        d = str(r['date'])[:10]
+        by_date.setdefault(d, []).append(r)
+        key = (str(r['expiration'])[:10], float(r['strike']))
+        series_by_contract.setdefault(key, []).append(
+            {'date': d, 'bid': r.get('bid'), 'ask': r.get('ask')})
+
+    results, metas = [], []
+    for idx, ed in enumerate(sorted(closes.keys())):
+        if step_days > 1 and idx % step_days != 0:
+            continue
+        day_rows = by_date.get(ed)
+        if not day_rows:
+            continue
+        spot = float(closes[ed])
+        ed_d = _date(ed)
+        exps = {}
+        for r in day_rows:
+            e = str(r['expiration'])[:10]
+            dte = (_date(e) - ed_d).days
+            if dte >= min_dte:
+                exps[e] = dte
+        if not exps:
+            continue
+        chosen = min(exps, key=lambda e: (abs(exps[e] - target_dte), exps[e]))
+        cand = [r for r in day_rows if str(r['expiration'])[:10] == chosen]
+        atm = min(cand, key=lambda r: abs(float(r['strike']) - spot))
+        strike = float(atm['strike'])
+        series = series_by_contract.get((chosen, strike))
+        if not series:
+            continue
+        res = run_backtest(series, cfg, strategy_name, entry_date=ed, fill=fill)
+        if res is None or res.entry_date != ed:
+            continue
+        results.append(res)
+        metas.append({'expiration': chosen, 'strike': strike,
+                      'spot': round(spot, 4), 'dte': exps[chosen]})
+    return {'results': results, 'metas': metas, 'summary': summarize(results)}
 
 
 def summarize(results: List[BacktestResult]) -> dict:

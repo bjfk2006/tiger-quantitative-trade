@@ -8,6 +8,7 @@ import os
 import subprocess
 
 DEFAULT_REPO = '/data1/dolt/options'
+DEFAULT_STOCKS_REPO = '/data1/dolt/stocks'
 
 
 class DoltError(RuntimeError):
@@ -51,6 +52,43 @@ def load_option_series(symbol, expiration, strike, put_call,
         if bid is None or ask is None:
             continue
         out.append({'date': str(r['date'])[:10], 'bid': float(bid), 'ask': float(ask)})
+    return out
+
+
+def load_underlying_closes(symbol, from_date, to_date, repo=DEFAULT_STOCKS_REPO):
+    """返回 {date: close}（stocks.ohlcv，用于定 ATM）。"""
+    sym = _safe(symbol, 'symbol').upper()
+    frm = _safe(from_date, 'from')
+    to = _safe(to_date, 'to')
+    sql = (f"select date, close from ohlcv where act_symbol='{sym}' "
+           f"and date between '{frm}' and '{to}' order by date")
+    out = {}
+    for r in _run_json(sql, repo):
+        if r.get('close') is not None:
+            out[str(r['date'])[:10]] = float(r['close'])
+    return out
+
+
+def load_symbol_chain(symbol, put_call, from_date, to_date, repo=DEFAULT_REPO):
+    """批量取某 symbol+方向、[from,to] 内的 (date,expiration,strike,bid,ask)（滚动 ATM 用）。"""
+    sym = _safe(symbol, 'symbol').upper()
+    frm = _safe(from_date, 'from')
+    to = _safe(to_date, 'to')
+    pc = _norm_put_call(put_call)
+    sql = ("select date, expiration, strike, bid, ask from option_chain "
+           f"where act_symbol='{sym}' and call_put='{pc}' "
+           f"and date between '{frm}' and '{to}' "
+           f"and expiration between '{frm}' and '{to}' order by date, expiration, strike")
+    out = []
+    for r in _run_json(sql, repo):
+        if r.get('strike') is None:
+            continue
+        out.append({
+            'date': str(r['date'])[:10], 'expiration': str(r['expiration'])[:10],
+            'strike': float(r['strike']),
+            'bid': float(r['bid']) if r.get('bid') is not None else None,
+            'ask': float(r['ask']) if r.get('ask') is not None else None,
+        })
     return out
 
 

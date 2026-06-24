@@ -74,3 +74,37 @@ python3 -m option_bot.backtest \
 1. 入场 ask / 平仓 bid（保守）是否 OK？（默认是）
 2. 首版「单合约 + 可选同合约多入场」是否够？滚动 ATM 以后再加？（默认是）
 3. 确认后我按本文件实现 + 单测 + host 实测，再提交。
+
+---
+
+## 附录 B（2026-06-24）：滚动 ATM 批量回测
+
+### 目标
+不再固定单合约，而是**每个交易日按当日现价选近月平值(ATM)合约入场**，跑同一策略到该合约退出，汇总全样本胜率/盈亏分布——衡量「策略本身」的历史表现。
+
+### 数据（两库联用）
+- `stocks.ohlcv.close`：每日标的现价 → 定 ATM。`dolt_source.load_underlying_closes`。
+- `options.option_chain`：合约日线。**批量一次取**该 symbol+方向在 [from, to+horizon] 的全部 (date,expiration,strike,bid,ask) 进内存，避免每个入场日多次 spawn dolt。`dolt_source.load_symbol_chain`。
+- 仅 2 次 dolt 调用，其余在 Python 内完成。
+
+### 选合约规则（每个入场日）
+1. `spot = closes[entry_date]`。
+2. 候选到期：当日链中出现、且 `DTE≥min_dte`(默认3) 的 expiration；选 **DTE 最接近 `target_dte`(默认30)** 的一个（并列取较小 DTE）。
+3. **ATM 行权价**：该到期下，当日 `|strike−spot|` 最小者。
+4. 取该 (expiration,strike) 合约从入场日到到期的日线 → 复用 §3 `run_backtest`（入场 ask、盯盘/平仓 bid、末日强平）。
+5. 入场节奏 `step_days`(默认1=每个交易日)。
+
+### 输出
+逐入场结果(含所选 expiration/strike/spot) + 汇总：入场数、胜率、均值%、最大盈/亏%、平均持有天、平仓原因分布。复用 `engine.summarize`。
+
+### 默认值（推荐，可 CLI 覆盖）
+| 项 | 默认 | flag |
+|---|---|---|
+| 目标 DTE | 30 | `--target-dte` |
+| 最小 DTE | 3 | `--min-dte` |
+| 入场节奏 | 每个交易日 | `--step-days` |
+| 方向 | Call | `--put-call` |
+| stocks 库 | /data1/dolt/stocks | `--stocks-repo` |
+
+### 不做
+- 不做 delta-ATM（按 |strike−spot| 即可）；不做多到期组合；SPCX 仍不可用（无期权）。
