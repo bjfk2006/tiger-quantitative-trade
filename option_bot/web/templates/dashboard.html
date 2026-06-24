@@ -122,12 +122,19 @@ setInterval(refresh, 3000);
 // ---------- 历史统计 ----------
 function q(id){ return document.getElementById(id); }
 function amtCell(v){ if(v===null||v===undefined) return '<td></td>'; const c=v>=0?'pos':'neg'; return '<td class="'+c+'">'+(v>=0?'+':'')+'$'+v.toFixed(2)+'</td>'; }
+// 下拉项把账户编进 value（account|identifier），避免同合约的实盘/模拟两笔混在一条线
+function selIdent(){
+  const v=q('hIdent').value; if(!v) return null;
+  const i=v.indexOf('|'); return {account:v.slice(0,i), identifier:v.slice(i+1)};
+}
 function histParams(withIdent){
   const p = new URLSearchParams();
   if(q('hFrom').value) p.set('from', q('hFrom').value);
   if(q('hTo').value) p.set('to', q('hTo').value);
-  if(q('hAccount').value) p.set('account', q('hAccount').value);
-  if(withIdent && q('hIdent').value) p.set('identifier', q('hIdent').value);
+  let acct = q('hAccount').value;
+  const si = withIdent ? selIdent() : null;
+  if(si){ p.set('identifier', si.identifier); if(si.account) acct = si.account; }
+  if(acct) p.set('account', acct);
   return p;
 }
 async function loadIdentifiers(){
@@ -135,7 +142,7 @@ async function loadIdentifiers(){
     const list = await fetch('/api/history/identifiers?'+histParams(false)).then(r=>r.json());
     const sel = q('hIdent'), cur = sel.value;
     sel.innerHTML = '<option value="">全部</option>' + (Array.isArray(list)?list:[]).map(x=>
-      '<option value="'+x.identifier+'">'+x.identifier+' ('+x.symbol+', '+x.n+'笔)</option>').join('');
+      '<option value="'+(x.account||'')+'|'+x.identifier+'">'+x.identifier+' ('+x.symbol+', 户'+(x.account||'?')+', '+x.n+'笔)</option>').join('');
     sel.value = cur;
   }catch(e){}
 }
@@ -188,16 +195,22 @@ function drawTicks(rows, metric){
   svg.innerHTML=extra+'<polyline points="'+pts+'" fill="none" stroke="'+col+'" stroke-width="1.5"/>';
 }
 async function loadTicks(){
-  const ident=q('hIdent').value;
-  if(!ident){ q('tickInfo').textContent='请在上方「标识」选具体合约（非"全部"）'; q('tickChart').innerHTML=''; return; }
+  const si=selIdent();
+  if(!si){ q('tickInfo').textContent='请在上方「标识」选具体合约（非"全部"）'; q('tickChart').innerHTML=''; return; }
   try{
     const d=await fetch('/api/ticks?'+histParams(true)).then(r=>r.json());
     const shown=d.ticks?d.ticks.length:0;
-    q('tickInfo').textContent=ident+'：'+(d.count||0)+' 个 tick'+((d.count||0)>shown?'（抽样到'+shown+'点）':'');
+    q('tickInfo').textContent=si.identifier+'：'+(d.count||0)+' 个 tick'+((d.count||0)>shown?'（抽样到'+shown+'点）':'');
     drawTicks(d.ticks||[], q('tickMetric').value);
   }catch(e){ q('tickInfo').textContent='查询失败'; }
 }
-(function(){ const t=new Date().toISOString().slice(0,10); q('hTo').value=t; q('hFrom').value=t; loadIdentifiers(); })();
+// 默认展示近 7 天（含昨天/今晚的交易），避免"打开就空"的默认日期坑
+(function(){
+  const today=new Date();
+  q('hTo').value = today.toISOString().slice(0,10);
+  q('hFrom').value = new Date(today.getTime()-7*86400000).toISOString().slice(0,10);
+  loadIdentifiers();
+})();
 </script>
 </body>
 </html>
