@@ -182,7 +182,7 @@ cd ~/tiger-quantitative-trade
 ./switch-account.sh paper       # 切模拟盘（重启 + 打印账户确认）
 ./switch-account.sh live yes    # 切实盘综合户(真实资金)，必须带 yes 显式确认
 ```
-切换 = 重指向 `data/tiger_openapi_config.properties` 符号链接 + `docker compose restart`，重启后打印 `当前账户 / is_paper` 供核对。
+切换 = 重指向 `data/tiger_openapi_config.properties` 符号链接 + **`docker compose up -d`（重建以重载 .env，不是 restart）** + 强制 `OBOT_OPEN_ON_START=false`，重启后打印 `当前账户 / is_paper` 供核对。
 
 > ⚠️ 切实盘前务必确认：账户买力是否够、`OBOT_MAX_QTY` 与止损设置、`OBOT_OPEN_ON_START` 应为 false。
 
@@ -387,3 +387,119 @@ OBOT_QTY=1
 改完 `.env` → `sudo docker compose up -d`；切回单腿把 `OBOT_MODE=single`。
 
 > ⚠️ 风险：长跨式付**两份**权利金，**只在标的大幅单边波动时盈利**；横盘/小波动两腿同亏。`leg_stop=−10%` 较早触发，会很快给一条腿定生死。`switch-account.sh live` 切实盘 + 自动开仓闸均仍生效。
+
+---
+
+## 16. 真实操作实例（开仓 / 选策略 / 改策略 / 平仓）
+
+> 全部在部署目录执行：`cd /root/tiger-quantitative-trade`。下面用一次真实的实盘交易（SPCX 155 Call，trailing）贯穿说明。
+>
+> **三条铁律**（贯穿所有操作）：
+> 1. 选策略/选标的全在 `.env`，改完必须 **`docker compose up -d`** 生效（`restart` 不重载 .env，§5/§6）。
+> 2. 程序**只会在容器启动那一刻**按 `OBOT_OPEN_ON_START` 决定是否开仓；**没有"远程开仓"接口**（操作面只支持平仓/急停/开关）。
+> 3. 实盘自动开仓被双闸拦截：必须同时 `OBOT_OPEN_ON_START=true` **且** `OBOT_ALLOW_LIVE_AUTO_OPEN=true`，否则拒绝（防误开）。
+
+### 16.1 开仓：实盘买 1 张 SPCX 155 Call，trailing 接管
+
+**第 1 步——切实盘并确认账户**（强制关自动开仓，先不开）：
+```bash
+./switch-account.sh live yes
+# 输出应包含： 当前账户: 3170246 is_paper= False
+```
+
+**第 2 步——查实时盘口，确认合约/点差/成本**（行情用当前配置即可）：
+```bash
+sudo docker exec option-bot python -m option_bot.cli.main chain SPCX --expiry 2026-06-26 --direction LONG
+# 关注 155 行： bid/ask 越接近越好（点差小），OI 越大越流动
+```
+
+**第 3 步——在 `.env` 选标的 + 策略 + 打开双闸**：
+```bash
+# 标的
+OBOT_MODE=single
+OBOT_SYMBOL=SPCX
+OBOT_DIRECTION=LONG          # LONG=买Call / SHORT=买Put
+OBOT_EXPIRY=2026-06-26
+OBOT_STRIKE=155
+OBOT_QTY=1
+OBOT_MAX_SPREAD=5            # 点差>5%拒单防滑点；流动性差可调大
+# 策略：trailing（移动止盈），见 §13
+OBOT_STRATEGY=trailing
+OBOT_TRAIL_ACTIVATION=20     # +20% 武装
+OBOT_TRAIL_GIVEBACK=10       # 从峰值回撤10个点平
+OBOT_TRAIL_RELATIVE_RATIO=20 # 峰值≥50%时改用 max(10, 峰值×20%)
+OBOT_TRAIL_RELATIVE_THRESHOLD=50
+OBOT_SL=50                   # 硬止损-50%（兜底，强制）
+OBOT_CLOSE_BUFFER=5          # 收盘前5分钟强平（强制）
+# 双闸：本次确实要开仓
+OBOT_OPEN_ON_START=true
+OBOT_ALLOW_LIVE_AUTO_OPEN=true
+```
+
+**第 4 步——生效（触发开仓）并核对成交**：
+```bash
+sudo docker compose up -d
+sleep 8
+sudo docker compose logs --since 2m | grep -E "开仓已提交|开仓成交|拒绝|ERROR"
+# 期望： 开仓成交 entry=7.9 qty=1 -> MONITORING
+```
+
+**第 5 步（关键安全收尾）——立刻把双闸改回 false（只改文件，别再重启）**：
+```bash
+sed -i 's/^OBOT_OPEN_ON_START=.*/OBOT_OPEN_ON_START=false/' .env
+sed -i 's/^OBOT_ALLOW_LIVE_AUTO_OPEN=.*/OBOT_ALLOW_LIVE_AUTO_OPEN=false/' .env
+# 不执行 up -d：运行中的容器靠 data 里的状态快照继续盯盘；
+# 这样即使日后有人 up -d 重启，也不会再误开第二张仓（杜绝事故）。
+```
+开仓后，常驻进程按 trailing 自动盯盘并在触发时平仓，无需值守。
+
+### 16.2 选策略 / 换策略（开仓前）
+
+改 `OBOT_STRATEGY` + 对应参数 → `up -d` 即可。常见几种（详见 §13）：
+```bash
+# 固定止盈：+30% 止盈、-50% 止损
+OBOT_STRATEGY=threshold ; OBOT_TP=30 ; OBOT_SL=50
+# 保本止损：冲过+20%后回吐到+5%即平
+OBOT_STRATEGY=breakeven ; OBOT_BREAKEVEN_ACTIVATION=20 ; OBOT_BREAKEVEN_LOCK=5
+# 组合 bracket：止盈40 + 保本(20→5) + 移动止盈(25/10) + 2小时时长
+OBOT_STRATEGY=bracket ; OBOT_TP=40 ; OBOT_BREAKEVEN_ACTIVATION=20 ; OBOT_BREAKEVEN_LOCK=5 ; OBOT_TRAIL_ACTIVATION=25 ; OBOT_TRAIL_GIVEBACK=10 ; OBOT_MAX_HOLD_MINUTES=120
+```
+```bash
+sudo docker compose up -d     # 生效（若 OPEN_ON_START=false 则只是换了"下次开仓用的策略"，不会立刻开仓）
+```
+
+### 16.3 持仓中改策略参数（收紧/放宽止盈）
+
+持仓中也能调参数，例如把回撤收紧到 5 个点锁更多利润：
+```bash
+sed -i 's/^OBOT_TRAIL_GIVEBACK=.*/OBOT_TRAIL_GIVEBACK=5/' .env
+sudo docker compose up -d
+```
+- 重启后状态机从 `data/` 快照**恢复 trailing 的 armed/peak**，新参数立即按新阈值判定；收盘前强平、硬止损始终生效。
+- ⚠️ **持仓中不要切换策略"种类"**（如 trailing→bracket）：快照里的运行态字段不一定对得上，易误判。要换种类请先平仓再换。
+- 提醒：`OPEN_ON_START` 若是 true，这次 `up -d` 会在盘中**再开一张**。持仓中调参务必确认它是 false（按 16.1 第 5 步本就该是 false）。
+
+### 16.4 平仓 / 急停 / 开关（操作面 apikey，运行中即时生效）
+
+操作面在**容器内** `127.0.0.1:8001`，须在容器内调用（§5）。`KEY` = `.env` 的 `OBOT_OPS_API_KEY`：
+```bash
+KEY=$(grep -E '^OBOT_OPS_API_KEY=' .env | cut -d= -f2-)
+ops(){ sudo docker exec option-bot python -c \
+ "import urllib.request as u;print(u.urlopen(u.Request('http://127.0.0.1:8001$1',method=('POST' if '$2' else 'GET'),headers={'X-API-Key':'$KEY'})).read().decode())"; }
+
+ops /ops/status            # 看状态（持仓/是否允许开仓）
+ops /ops/close POST        # 手动市价平掉当前持仓（→ MANUAL）
+ops /ops/disable-open POST # 关闭开仓闸（kill switch：只盯盘/平仓，不再开新仓）
+ops /ops/enable-open POST  # 重新允许开仓
+ops /ops/stop POST         # 停止盯盘线程（不平仓，仅停监控）
+```
+> 返回 `{"queued":"close"}` 等，命令在 ≤1 个盯盘 tick 内由 bot 线程执行。平仓也可在看板看不到按钮——看板是**只读**的，写操作只走这里。
+
+### 16.5 收尾：切回模拟盘待命（更安全）
+
+交易做完、不想让实盘配置一直挂着：
+```bash
+./switch-account.sh paper    # 切回模拟（同样 up -d 重建 + 强制 OPEN_ON_START=false）
+./switch-account.sh status   # 核对当前指向
+```
+历史与逐tick走势已落库（`data/option_bot.db`），切账户不丢；按 §14 在看板查看（注意默认日期、按账户筛选）。
