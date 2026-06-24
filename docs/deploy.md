@@ -503,3 +503,38 @@ ops /ops/stop POST         # 停止盯盘线程（不平仓，仅停监控）
 ./switch-account.sh status   # 核对当前指向
 ```
 历史与逐tick走势已落库（`data/option_bot.db`），切账户不丢；按 §14 在看板查看（注意默认日期、按账户筛选）。
+
+---
+
+## 17. 期权日线回测（dolt 数据 + 复用实盘策略）
+
+离线分析工具,在**宿主机**直接跑(容器内无 dolt 数据):用 dolt 库 `post-no-preference/options` 的每日 bid/ask,把某合约喂给**与实盘同一套平仓策略**(`build_strategy`),看"当时这么交易会怎样"。**零侵入实盘**(不动容器)。
+
+> ⚠️ **日线近似**:`option_chain` 每合约每天 1 行,**无法复现 bot 盘中每 2 秒的 trailing 与收盘前强平**;回测用「到期/末日强平」近似收盘强平,峰值按逐日 bid 计,结论偏保守。**不含 SPCX**(该库无此新股)。设计见 `docs/design/2026-06-24-options-daily-backtest.md`。
+
+口径:入场付 **ask**,逐日/平仓按 **bid**(多头真实成交侧);策略返回任一平仓原因即平,否则末日强平。
+
+```bash
+cd /root/tiger-quantitative-trade            # 仓库在 root，用 sudo
+# 单笔(带逐日轨迹)：AMD 2026-04-17 230 Call，trailing(对齐实盘相对回撤)
+sudo HOME=/root python3 -m option_bot.backtest \
+  --symbol AMD --expiration 2026-04-17 --strike 230 --put-call Call \
+  --from 2026-02-10 --to 2026-04-17 \
+  --strategy trailing --trail-activation 20 --trail-giveback 10 \
+  --trail-relative-ratio 20 --trail-relative-threshold 50 --sl 50 --verbose
+
+# 同合约多入场批量(出胜率/均值/最大盈亏/原因分布)
+sudo HOME=/root python3 -m option_bot.backtest \
+  --symbol AMD --expiration 2026-04-17 --strike 230 --put-call Call \
+  --from 2026-02-10 --to 2026-04-17 --strategy trailing --batch-entries
+```
+
+参数与 `.env`/`run` 同义:`--strategy threshold|trailing|breakeven|time_in_trade|bracket`、`--tp/--sl`、`--trail-*`、`--trail-relative-*`、`--breakeven-*`、`--max-hold-minutes`;`--fill ask|mid`、`--entry-date`、`--json`。
+
+先找历史较长的合约:
+```bash
+cd /data1/dolt/options && HOME=/root dolt sql -q \
+ "select expiration,strike,count(*) n,min(date) f,max(date) l from option_chain \
+  where act_symbol='AMD' and call_put='Call' and date between '2026-01-02' and '2026-06-23' \
+  group by expiration,strike order by n desc limit 5"
+```
