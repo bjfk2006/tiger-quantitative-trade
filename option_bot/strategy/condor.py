@@ -79,7 +79,7 @@ def atm_iv(chain_rows):
     """链中 |delta| 最接近 0.5 的期权的隐含波动率（ATM IV 近似）。无有效行返回 None。"""
     best, best_iv = None, None
     for r in chain_rows:
-        d, iv = r.get('delta'), r.get('implied_vol')
+        d, iv = _num(r.get('delta')), _num(r.get('implied_vol'))
         if d is None or iv is None:
             continue
         dist = abs(abs(d) - 0.5)
@@ -89,24 +89,27 @@ def atm_iv(chain_rows):
 
 
 def select_by_delta(chain_rows, target_abs_delta, put_call):
-    """在指定方向(CALL/PUT)里选 |delta| 最接近 target 的一行。无候选返回 None。"""
+    """在指定方向(CALL/PUT)里选 |delta| 最接近 target 的一行。无候选返回 None。
+
+    NaN 的 delta/strike 视为缺失（闭市或冷门行权价的希腊字母可能为 NaN）。
+    """
     pc = put_call.upper()
     cands = [r for r in chain_rows
-             if str(r.get('put_call', '')).upper() == pc and r.get('delta') is not None
-             and r.get('strike') is not None]
+             if str(r.get('put_call', '')).upper() == pc
+             and _num(r.get('delta')) is not None and _num(r.get('strike')) is not None]
     if not cands:
         return None
-    return min(cands, key=lambda r: abs(abs(r['delta']) - target_abs_delta))
+    return min(cands, key=lambda r: abs(abs(_num(r['delta'])) - target_abs_delta))
 
 
 def nearest_strike_row(chain_rows, target_strike, put_call):
-    """在指定方向里选行权价最接近 target_strike 的一行（选翼用）。"""
+    """在指定方向里选行权价最接近 target_strike 的一行（选翼用）。NaN 行权价跳过。"""
     pc = put_call.upper()
     cands = [r for r in chain_rows
-             if str(r.get('put_call', '')).upper() == pc and r.get('strike') is not None]
+             if str(r.get('put_call', '')).upper() == pc and _num(r.get('strike')) is not None]
     if not cands:
         return None
-    return min(cands, key=lambda r: abs(float(r['strike']) - target_strike))
+    return min(cands, key=lambda r: abs(_num(r['strike']) - target_strike))
 
 
 def build_condor(call_rows, put_rows, short_delta, wing_width):

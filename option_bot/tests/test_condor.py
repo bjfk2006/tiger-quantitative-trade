@@ -73,6 +73,19 @@ class TestBuildCondor(unittest.TestCase):
     def test_returns_none_when_no_short(self):
         self.assertIsNone(build_condor([], [], 0.16, 5))
 
+    def test_nan_delta_skipped(self):
+        nan = float('nan')
+        # 闭市/冷门：delta 为 NaN 的行应被跳过，不参与选腿
+        puts = [row('Pnan', 'PUT', 95, nan), row('P95', 'PUT', 95, -0.16),
+                row('P90', 'PUT', 90, -0.10)]
+        self.assertEqual(select_by_delta(puts, 0.16, 'PUT')['identifier'], 'P95')
+        self.assertIsNone(select_by_delta([row('Pnan', 'PUT', 95, nan)], 0.16, 'PUT'))
+
+    def test_atm_iv_skips_nan(self):
+        nan = float('nan')
+        rows = [row('A', 'CALL', 100, nan, iv=0.9), row('B', 'CALL', 100, 0.5, iv=0.33)]
+        self.assertEqual(atm_iv(rows), 0.33)
+
 
 class TestCreditAndRisk(unittest.TestCase):
     def _legs_quotes(self):
