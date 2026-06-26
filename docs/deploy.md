@@ -110,6 +110,8 @@ ln -sfn tiger_openapi_config_模拟.properties data/tiger_openapi_config.propert
 | `OBOT_OPS_PORT` / `OBOT_OPS_EXPOSE` | 操作面端口 8001 / 是否对外（默认 false=仅本机） |
 | `OBOT_TP` / `OBOT_SL` | 固定止盈% / 硬止损%（硬止损所有策略强制生效） |
 | `OBOT_CLOSE_BUFFER` | 收盘前 N 分钟强平（所有策略强制生效） |
+| `OBOT_EOD_CLOSE_MAX_DTE` | 收盘前强平只作用于 DTE≤该值的期权（默认1）；更长期权持隔夜，见 §18 |
+| `OBOT_DAILY_LOSS_LIMIT` | 当日已实现亏损达此$即停止当日开仓（默认300，0=关），见 §18 |
 | `OBOT_POLL_INTERVAL` / `OBOT_MAX_QTY` / `OBOT_MAX_SPREAD` | 轮询间隔 / 单笔上限 / 最大点差% |
 | **`OBOT_STRATEGY`** | 平仓策略：`threshold`/`trailing`/`breakeven`/`time_in_trade`/`bracket`（默认 threshold，见 §13） |
 | `OBOT_TRAIL_ACTIVATION` / `OBOT_TRAIL_GIVEBACK` | 移动止盈：武装阈值% / 从峰值回撤点数(绝对) |
@@ -553,3 +555,28 @@ sudo HOME=/root python3 -m option_bot.backtest --symbol AMD --put-call Call \
 选合约：DTE 最接近 `--target-dte`(默认30，`--min-dte` 默认3) 的到期；该到期下 `|行权价−现价|` 最小者为 ATM。`--step-days` 控入场节奏，`--put-call Put` 测看跌，`--json` 出明细。
 
 > ⚠️ 解读注意：① 仍是**日线近似**（盘中 trailing/强平不可复现）；② 「每个交易日都买 ATM」是激进取样，且单一标的若处于大牛/大熊单边行情，均值会被严重带偏（非策略普适表现）；③ **不含 SPCX**（无期权）。回测结论仅供参考，不等于实盘。
+
+## 18. DTE 区分收盘强平 + 当日亏损上限（风控）
+
+两项实盘风控（设计 `docs/design/2026-06-26-dte-aware-eod-and-daily-loss-limit.md`），缘起 06-25 的两类亏损：7DTE 的 call 被收盘窗口一刀切强平、当天越亏越追。改完 `.env` 后 **`docker compose up -d --force-recreate`** 生效（§6）。
+
+| env | 默认 | 含义 |
+|---|---|---|
+| `OBOT_EOD_CLOSE_MAX_DTE` | `1` | 收盘前强平**只作用于 DTE≤该值**的期权（0/1=临近到期当日平）；DTE 更大的多日期权**持有过夜**。`0`=只有当日到期(0DTE)才收盘平。 |
+| `OBOT_DAILY_LOSS_LIMIT` | `300` | 当日**已实现**亏损达此美元数即**停止当日开仓**（kill switch）；`0`=关闭。 |
+
+**DTE 强平**：DTE = 到期日 − 美东当日（到期当天=0、前一天=1）。临近收盘窗口（`OBOT_CLOSE_BUFFER`）内，仅 `DTE ≤ OBOT_EOD_CLOSE_MAX_DTE` 才 `TIME_FORCE_CLOSE`；更长期权跳过强平、但**硬止损/止盈/移动止盈仍照常生效**。DTE 解析异常时安全退化为「强平」（不把未知期限留过夜）。
+
+> ⚠️ **持有过夜的代价**：① 收盘后市价单仅 RTH 可成交——隔夜若触发止损/止盈，要到次日开盘才真正成交；② 盘后/隔夜行情可能滞后、点差大，看到的盈亏可能失真；③ **隔夜跳空风险自负**。这是「持有多日期权」的固有取舍，用 `OBOT_EOD_CLOSE_MAX_DTE` 自选边界（怕跳空就设 `1`，要持长仓可设更大或专门用多日到期合约）。
+
+**当日亏损上限**：开仓前（`OPEN_ON_START`/每次 `--force-recreate`）按**美东当日**窗口配对已平仓交易、汇总已实现盈亏；`≤ -OBOT_DAILY_LOSS_LIMIT` 则拒绝开仓并打 critical 日志。**只挡新仓、不平已有仓**（持仓可能回血，交给策略管理）。统计故障一律放行开仓（不因核算异常误杀）。正好挡住「同一天越亏越追」。
+
+```bash
+# 在 .env 设置（多日期权持隔夜 + 当日亏 $300 停手）
+OBOT_EOD_CLOSE_MAX_DTE=1
+OBOT_DAILY_LOSS_LIMIT=300
+sudo docker compose up -d --force-recreate     # 生效
+
+# 验证：当日已亏到上限再开仓会被拦，日志可见
+sudo docker compose logs --since 10m option-bot | grep -i "当日已实现亏损\|stop"
+```

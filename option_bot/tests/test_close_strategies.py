@@ -13,9 +13,9 @@ from option_bot.strategy.close_strategies import (BracketStrategy,
                                                   trailing_giveback)
 
 
-def ctx(pnl, mtc=None, opened_at=None, now_ts=None):
+def ctx(pnl, mtc=None, opened_at=None, now_ts=None, dte=None):
     return StrategyContext(pnl_percent=pnl, minutes_to_close=mtc,
-                           opened_at=opened_at, now_ts=now_ts)
+                           opened_at=opened_at, now_ts=now_ts, dte=dte)
 
 
 class TestThreshold(unittest.TestCase):
@@ -221,6 +221,50 @@ class TestBracket(unittest.TestCase):
         s2.load_state(s.state())
         self.assertTrue(s2.trail_armed)
         self.assertEqual(s2.peak, 33)
+
+
+class TestDteAwareForceClose(unittest.TestCase):
+    """收盘前强平按 DTE 区分：DTE≤eod_close_max_dte(默认1) 才强平；更长期权持有过夜。"""
+
+    def setUp(self):
+        # 默认 eod_close_max_dte=1
+        self.s = ThresholdStrategy(close_buffer_minutes=5, sl_percent=50, tp_percent=30)
+
+    def test_dte0_force_close(self):
+        self.assertEqual(self.s.decide(ctx(0, 3, dte=0)), CloseReason.TIME_FORCE_CLOSE)
+
+    def test_dte1_force_close(self):
+        self.assertEqual(self.s.decide(ctx(-10, 3, dte=1)), CloseReason.TIME_FORCE_CLOSE)
+
+    def test_dte_none_force_close(self):
+        # 未知 DTE → 安全默认仍强平
+        self.assertEqual(self.s.decide(ctx(0, 3, dte=None)), CloseReason.TIME_FORCE_CLOSE)
+
+    def test_dte7_holds_overnight(self):
+        # 7DTE 临近收盘但盈亏在阈值内 → 不强平、不止盈止损 → 持有过夜
+        self.assertIsNone(self.s.decide(ctx(-10, 3, dte=7)))
+
+    def test_dte2_holds_with_default_threshold(self):
+        # 阈值=1 时 DTE=2 也持有
+        self.assertIsNone(self.s.decide(ctx(5, 1, dte=2)))
+
+    def test_long_dte_still_stops_loss_near_close(self):
+        # 即使持有过夜豁免，硬止损在收盘窗口内仍生效
+        self.assertEqual(self.s.decide(ctx(-50, 3, dte=7)), CloseReason.STOP_LOSS)
+
+    def test_long_dte_still_takes_profit_near_close(self):
+        self.assertEqual(self.s.decide(ctx(30, 3, dte=7)), CloseReason.TAKE_PROFIT)
+
+    def test_configurable_threshold(self):
+        # eod_close_max_dte=2 → DTE2 强平、DTE3 持有
+        s = ThresholdStrategy(5, 50, 30)
+        s.eod_close_max_dte = 2
+        self.assertEqual(s.decide(ctx(0, 3, dte=2)), CloseReason.TIME_FORCE_CLOSE)
+        self.assertIsNone(s.decide(ctx(5, 3, dte=3)))
+
+    def test_build_strategy_injects_dte_threshold(self):
+        s = build_strategy('trailing', StrategyConfig(eod_close_max_dte=3))
+        self.assertEqual(s.eod_close_max_dte, 3)
 
 
 class TestBuild(unittest.TestCase):

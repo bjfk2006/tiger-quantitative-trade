@@ -4,7 +4,7 @@ import unittest
 
 from option_bot.persistence.stats import (downsample, equity_curve,
                                           filter_by_close_ts, pair_round_trips,
-                                          summarize)
+                                          realized_pnl_amount, summarize)
 
 
 class TestDownsample(unittest.TestCase):
@@ -89,6 +89,33 @@ class TestFilterAndSummary(unittest.TestCase):
     def test_equity_curve(self):
         c = equity_curve(self.rts)
         self.assertEqual([p['cum_pnl'] for p in c], [100.0, 0.0, 300.0])
+
+
+class TestRealizedPnlAmount(unittest.TestCase):
+    """当日亏损上限核算用：按平仓时间窗 + 账户配对汇总已实现盈亏$。"""
+
+    def test_window_filters_to_day(self):
+        rows = [tr('OPEN', 5, 1000), tr('CLOSE', 6, 2000),     # +100, close@2000
+                tr('OPEN', 8, 3000), tr('CLOSE', 7, 4000)]     # -100, close@4000
+        # 窗口 [3500, 5000) 只含第二笔 → -100
+        self.assertAlmostEqual(realized_pnl_amount(rows, 3500, 5000), -100.0)
+        # 全窗 → 0
+        self.assertAlmostEqual(realized_pnl_amount(rows, 0, 5000), 0.0)
+
+    def test_open_before_window_still_paired(self):
+        # OPEN 早于窗口、CLOSE 落在窗口内：配对需完整 OPEN，故不按 ts 截断输入
+        rows = [tr('OPEN', 10, 100), tr('CLOSE', 7, 9000)]     # -300, close@9000
+        self.assertAlmostEqual(realized_pnl_amount(rows, 8000, 10000), -300.0)
+
+    def test_account_filter(self):
+        rows = [tr('OPEN', 5, 1000, acc='a'), tr('CLOSE', 4, 2000, acc='a'),   # a: -100
+                tr('OPEN', 5, 1000, acc='b', ident='Y'),
+                tr('CLOSE', 9, 2000, acc='b', ident='Y')]                       # b: +400
+        self.assertAlmostEqual(realized_pnl_amount(rows, 0, 5000, account='a'), -100.0)
+        self.assertAlmostEqual(realized_pnl_amount(rows, 0, 5000, account='b'), 400.0)
+
+    def test_no_trades_zero(self):
+        self.assertEqual(realized_pnl_amount([], 0, 5000), 0.0)
 
 
 if __name__ == '__main__':

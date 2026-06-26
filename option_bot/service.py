@@ -61,7 +61,7 @@ class Supervisor:
     """bot 线程主体：装配好的状态机 + 监控循环 + 命令排空。"""
 
     def __init__(self, sm, loop, config, command_queue, md=None, open_spec=None,
-                 sleep=time.sleep):
+                 sleep=time.sleep, repo=None, account=None):
         self._sm = sm
         self._loop = loop
         self._cfg = config
@@ -69,6 +69,8 @@ class Supervisor:
         self._md = md
         self._open_spec = open_spec
         self._sleep = sleep
+        self._repo = repo            # 当日亏损上限核算用（只读 trades）
+        self._account = account
         self._stopped = False
         self.bot_alive = False
 
@@ -106,7 +108,41 @@ class Supervisor:
         elif self._open_spec and self._md is not None:
             self._do_open_on_start()
 
+    def _today_window_ms(self):
+        """美东「今天」的 [00:00, 次日00:00) 毫秒区间。"""
+        import datetime as dt
+        import pytz
+        tz = pytz.timezone(self._cfg.timezone)
+        now = dt.datetime.now(tz)
+        start = tz.localize(dt.datetime(now.year, now.month, now.day))
+        start_ms = int(start.timestamp() * 1000)
+        return start_ms, start_ms + 86400000
+
+    def _daily_loss_blocked(self):
+        """当日已实现亏损达上限则拦截开仓（只挡开仓，不平已有仓）。
+
+        统计/时间异常一律放行（不因核算故障误杀开仓），仅告警。
+        """
+        limit = getattr(self._cfg, 'daily_loss_limit', 0.0) or 0.0
+        if limit <= 0 or self._repo is None:
+            return False
+        try:
+            from option_bot.persistence.stats import realized_pnl_amount
+            start_ms, end_ms = self._today_window_ms()
+            trades = self._repo.list_trades_in_range(account=self._account)
+            pnl = realized_pnl_amount(trades, start_ms, end_ms, account=self._account)
+        except Exception as e:  # noqa: BLE001
+            logger.warning('当日亏损上限核算失败，放行开仓: %s', e)
+            return False
+        if pnl <= -abs(limit):
+            logger.critical('当日已实现亏损 $%.2f 达上限 $%.2f，停止当日开仓(kill switch)',
+                            -pnl, abs(limit))
+            return True
+        return False
+
     def _do_open_on_start(self):
+        if self._daily_loss_blocked():
+            return
         spec = self._open_spec
         try:
             d = Direction(spec['direction'])
@@ -192,6 +228,8 @@ def build_bot_from_env(env_get=os.environ.get):
         tp_percent=_f(env_get('OBOT_TP'), 30.0),
         sl_percent=_f(env_get('OBOT_SL'), 50.0),
         close_buffer_minutes=_i(env_get('OBOT_CLOSE_BUFFER'), 5),
+        eod_close_max_dte=_i(env_get('OBOT_EOD_CLOSE_MAX_DTE'), 1),
+        daily_loss_limit=_f(env_get('OBOT_DAILY_LOSS_LIMIT'), 0.0),
         poll_interval=_f(env_get('OBOT_POLL_INTERVAL'), 2.0),
         max_qty=_i(env_get('OBOT_MAX_QTY'), 1),
         max_spread_pct=_f(env_get('OBOT_MAX_SPREAD'), 5.0),
@@ -257,7 +295,8 @@ def build_bot_from_env(env_get=os.environ.get):
                 'strike': _f(env_get('OBOT_STRIKE'), None),
                 'qty': _i(env_get('OBOT_QTY'), 1),
             }
-    sup = Supervisor(sm, loop, cfg, cmd_queue, md=md, open_spec=open_spec)
+    sup = Supervisor(sm, loop, cfg, cmd_queue, md=md, open_spec=open_spec,
+                     repo=repo, account=account)
     return sup, repo, cmd_queue
 
 

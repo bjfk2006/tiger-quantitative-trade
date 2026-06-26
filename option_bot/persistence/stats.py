@@ -83,6 +83,20 @@ def summarize(rts):
     }
 
 
+def realized_pnl_amount(trades, start_ts=None, end_ts=None, account=None,
+                        multiplier=OPTION_MULTIPLIER):
+    """区间内已实现总盈亏$（按平仓时间 [start, end) 过滤）。
+
+    配对需完整 OPEN，故调用方应传「未按 ts 截断」的 trades（OPEN 可能早于区间）。
+    account 非空时先按账户过滤，避免跨账户同名合约误配对。供当日亏损上限核算用。
+    """
+    if account:
+        trades = [t for t in trades if t.get('account') == account]
+    rts = pair_round_trips(trades, multiplier)
+    rts = filter_by_close_ts(rts, start_ts, end_ts)
+    return summarize(rts).get('total_pnl_amount', 0.0)
+
+
 def downsample(rows, max_points=1000):
     """点过多时均匀抽样到 <= max_points（始终保留最后一点）。"""
     n = len(rows)

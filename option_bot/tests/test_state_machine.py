@@ -205,5 +205,40 @@ class TestStateMachine(unittest.TestCase):
         self.assertAlmostEqual(pnl, 25.0)  # (10-8)/8*100
 
 
+class TestComputeDte(unittest.TestCase):
+    """DTE 计算：按美东自然日，到期当日=0；用注入的 now_ms 保证确定性。"""
+
+    def _sm_at(self, now_iso_et):
+        import datetime as dt
+        import pytz
+        tz = pytz.timezone('America/New_York')
+        now = tz.localize(dt.datetime.strptime(now_iso_et, '%Y-%m-%d %H:%M'))
+        now_ms = int(now.timestamp() * 1000)
+        td = MagicMock(); td.account = 'paper-1'
+        sm = PositionStateMachine(td, MagicMock(), MagicMock(), StrategyConfig(),
+                                  sleep=lambda *_: None, now_ms=lambda: now_ms)
+        return sm
+
+    def test_dte_two_days_out(self):
+        sm = self._sm_at('2025-08-13 12:00')
+        sm.pick = make_pick()  # expiry 20250815
+        self.assertEqual(sm._compute_dte(), 2)
+
+    def test_dte_zero_on_expiry_day(self):
+        sm = self._sm_at('2025-08-15 09:35')
+        sm.pick = make_pick()
+        self.assertEqual(sm._compute_dte(), 0)
+
+    def test_dte_none_without_pick(self):
+        sm = self._sm_at('2025-08-13 12:00')
+        self.assertIsNone(sm._compute_dte())
+
+    def test_dte_none_on_bad_expiry(self):
+        sm = self._sm_at('2025-08-13 12:00')
+        sm.pick = OptionPick(symbol='X', expiry='bad', strike=1.0,
+                             put_call='CALL', identifier='X')
+        self.assertIsNone(sm._compute_dte())
+
+
 if __name__ == '__main__':
     unittest.main()

@@ -189,12 +189,31 @@ class PositionStateMachine:
         if self._strategy is None:
             return None
         ctx.opened_at = self._opened_at   # 注入开仓时间(权威来源, resume 后仍正确)
+        ctx.dte = self._compute_dte()     # 注入 DTE，供收盘前强平按到期远近区分
         reason = self._strategy.decide(ctx)
         try:
             self._save()  # 持久化最新策略状态(trailing 峰值等)
         except Exception as e:  # noqa: BLE001
             logger.warning('持久化策略状态失败: %s', e)
         return reason
+
+    def _compute_dte(self):
+        """距到期天数(按美东自然日)：到期当日=0、前一日=1。未知返回 None。
+
+        用可注入的 _now_ms() 算「当前美东日期」，便于单测；pick.expiry 为 YYYYMMDD。
+        """
+        pick = self.pick
+        if not pick or not getattr(pick, 'expiry', None):
+            return None
+        try:
+            import datetime as dt
+            import pytz
+            tz = pytz.timezone(self._cfg.timezone)
+            today = dt.datetime.fromtimestamp(self._now_ms() / 1000.0, tz).date()
+            exp = dt.datetime.strptime(pick.expiry, '%Y%m%d').date()
+            return (exp - today).days
+        except Exception:  # noqa: BLE001 —— 到期解析异常不应阻断盯盘，退化为 None(走强平)
+            return None
 
     # ---------- 崩溃恢复（设计 Flow 5.3）----------
     def resume(self):

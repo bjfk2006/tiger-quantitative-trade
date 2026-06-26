@@ -34,6 +34,7 @@ class StrategyContext:
     entry_price: Optional[float] = None
     now_ts: Optional[int] = None
     opened_at: Optional[int] = None    # 开仓时间(ms)，由状态机注入；time_in_trade 用
+    dte: Optional[int] = None          # 距到期天数，由状态机注入；收盘前强平的 DTE 判据
 
 
 class CloseStrategy(ABC):
@@ -55,14 +56,18 @@ class CloseStrategy(ABC):
 class BaseCloseStrategy(CloseStrategy):
     """安全底座：时间强平 + 硬止损永远优先生效。"""
 
-    def __init__(self, close_buffer_minutes, sl_percent):
+    def __init__(self, close_buffer_minutes, sl_percent, eod_close_max_dte=1):
         self.close_buffer = close_buffer_minutes
         self.sl_percent = sl_percent
+        # 收盘前强平只作用于 DTE≤该值的期权；更长期权持有过夜（由 build_strategy 按配置覆盖）
+        self.eod_close_max_dte = eod_close_max_dte
 
     def decide(self, ctx):
-        # ① 时间强平：无条件，最高优先级（即使 pnl 不可得也要平）
+        # ① 收盘前强平：仅当 DTE 已临近(≤ eod_close_max_dte)才平；
+        #    DTE 未知(None)同样强平（安全默认，不把未知期限留过夜）；更长期权落到下面继续判止损/止盈。
         if ctx.minutes_to_close is not None and ctx.minutes_to_close <= self.close_buffer:
-            return CloseReason.TIME_FORCE_CLOSE
+            if ctx.dte is None or ctx.dte <= self.eod_close_max_dte:
+                return CloseReason.TIME_FORCE_CLOSE
         if ctx.pnl_percent is None:
             return None
         # ② 硬止损兜底
@@ -252,18 +257,22 @@ def build_strategy(name, cfg) -> CloseStrategy:
     name = (name or 'threshold').lower()
     cb, sl = cfg.close_buffer_minutes, cfg.sl_percent
     if name == 'threshold':
-        return ThresholdStrategy(cb, sl, cfg.tp_percent)
-    if name == 'trailing':
-        return TrailingStrategy(cb, sl, cfg.trail_activation, cfg.trail_giveback,
-                                cfg.trail_relative_ratio, cfg.trail_relative_threshold)
-    if name == 'breakeven':
+        strat = ThresholdStrategy(cb, sl, cfg.tp_percent)
+    elif name == 'trailing':
+        strat = TrailingStrategy(cb, sl, cfg.trail_activation, cfg.trail_giveback,
+                                 cfg.trail_relative_ratio, cfg.trail_relative_threshold)
+    elif name == 'breakeven':
         # standalone 时若未配 activation 则回退默认 20
-        return BreakevenStrategy(cb, sl, cfg.breakeven_activation or 20.0, cfg.breakeven_lock)
-    if name == 'time_in_trade':
-        return TimeInTradeStrategy(cb, sl, cfg.max_hold_minutes or 60.0)
-    if name == 'bracket':
-        return BracketStrategy(cb, sl, cfg.tp_percent, cfg.breakeven_activation,
-                               cfg.breakeven_lock, cfg.trail_activation,
-                               cfg.trail_giveback, cfg.max_hold_minutes,
-                               cfg.trail_relative_ratio, cfg.trail_relative_threshold)
-    raise ValueError(f'未知平仓策略: {name}（可选: {list(STRATEGY_REGISTRY)}）')
+        strat = BreakevenStrategy(cb, sl, cfg.breakeven_activation or 20.0, cfg.breakeven_lock)
+    elif name == 'time_in_trade':
+        strat = TimeInTradeStrategy(cb, sl, cfg.max_hold_minutes or 60.0)
+    elif name == 'bracket':
+        strat = BracketStrategy(cb, sl, cfg.tp_percent, cfg.breakeven_activation,
+                                cfg.breakeven_lock, cfg.trail_activation,
+                                cfg.trail_giveback, cfg.max_hold_minutes,
+                                cfg.trail_relative_ratio, cfg.trail_relative_threshold)
+    else:
+        raise ValueError(f'未知平仓策略: {name}（可选: {list(STRATEGY_REGISTRY)}）')
+    # 收盘前强平的 DTE 阈值由配置统一注入（默认 1）
+    strat.eod_close_max_dte = getattr(cfg, 'eod_close_max_dte', 1)
+    return strat

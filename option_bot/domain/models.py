@@ -80,6 +80,8 @@ class StrategyConfig:
     tp_percent: float = 30.0          # 止盈阈值（+%，threshold 策略用）
     sl_percent: float = 50.0          # 硬止损阈值（-%，所有策略强制生效）
     close_buffer_minutes: int = 5     # 收盘前 N 分钟强平（所有策略强制生效）
+    # 收盘前强平仅作用于 DTE≤该值的期权（0/1=临近到期当日平）；更长期权持有过夜
+    eod_close_max_dte: int = 1
     # 平仓策略：threshold（默认，等价 tp/sl）/ trailing（移动止盈，涨破 activation 后回撤 giveback 平仓）
     strategy_name: str = 'threshold'
     trail_activation: float = 20.0    # trailing 武装阈值（+%）
@@ -106,6 +108,7 @@ class StrategyConfig:
     fill_poll_interval: float = 1.0   # 成交确认轮询间隔（秒）
     fill_timeout: float = 30.0        # 成交确认上限（秒）
     max_data_failures: int = 5        # 连续数据拉取失败触发 kill switch
+    daily_loss_limit: float = 0.0     # 当日已实现亏损达此美元数即停止当日开仓(0=关闭)
     enable_open: bool = True
     enable_auto_close: bool = True
     # 半日市（提前收盘）日期表：'YYYY-MM-DD' -> 'HH:MM'(美东)。SDK 不提供，需本地配置。
