@@ -103,7 +103,7 @@ ln -sfn tiger_openapi_config_模拟.properties data/tiger_openapi_config.propert
 
 | 变量 | 说明 |
 |---|---|
-| `TIGEROPEN_PROPS_PATH` | 固定 `/app/data/tiger_openapi_config.properties`（指向符号链接） |
+| `TIGEROPEN_PROPS_PATH` | bot 实际读取的账户配置文件（容器内路径），如 `/app/data/tiger_openapi_config_模拟.properties`。**这是决定账户的唯一变量**；`switch-account.sh paper/live` 会改写它。不要指向 `tiger_openapi_config.properties` 符号链接（那只是人类参考） |
 | `OBOT_WEB_USER` / `OBOT_WEB_PASSWORD` | **看板登录账密（必填，否则不启动）** |
 | `OBOT_WEB_PORT` | 看板端口，默认 8000 |
 | `OBOT_OPS_API_KEY` | 操作面 apikey；不填则操作面不启动 |
@@ -184,7 +184,8 @@ cd ~/tiger-quantitative-trade
 ./switch-account.sh paper       # 切模拟盘（重启 + 打印账户确认）
 ./switch-account.sh live yes    # 切实盘综合户(真实资金)，必须带 yes 显式确认
 ```
-切换 = 重指向 `data/tiger_openapi_config.properties` 符号链接 + **`docker compose up -d`（重建以重载 .env，不是 restart）** + 强制 `OBOT_OPEN_ON_START=false`，重启后打印 `当前账户 / is_paper` 供核对。
+切换 = 改写 `.env` 的 **`TIGEROPEN_PROPS_PATH`**（bot 真正读取的账户文件，权威来源）+ 同步更新 `data/tiger_openapi_config.properties` 符号链接（仅人类参考）+ **`docker compose up -d`（重建以重载 .env，不是 restart）** + 强制 `OBOT_OPEN_ON_START=false`，重启后打印 `当前账户 / is_paper` 供核对。
+> 历史坑：早期 `.env` 把 `TIGEROPEN_PROPS_PATH` 指向某个固定账户文件、而切换脚本只翻符号链接，导致**切换无效、bot 一直停在原账户**。现脚本以 `TIGEROPEN_PROPS_PATH` 为准，已修复。`switch-account.sh status` 会同时打印这两者。
 
 > ⚠️ 切实盘前务必确认：账户买力是否够、`OBOT_MAX_QTY` 与止损设置、`OBOT_OPEN_ON_START` 应为 false。
 
