@@ -18,7 +18,7 @@ import time
 
 from option_bot.adapters.errors import CloseRejected, DataUnavailable, OpenRejected
 from option_bot.domain.models import (BotState, CloseReason, CondorLeg,
-                                      CondorSnapshot)
+                                      CondorSnapshot, OptionPick, PositionView)
 from option_bot.persistence.sink import NullSink
 
 logger = logging.getLogger('option_bot.condor')
@@ -238,6 +238,22 @@ class CondorManager:
         self._idle_interval = 5.0   # IDLE/PROPOSED 轮询间隔(秒)，保证 approve 命令及时响应
 
     # ---------- 工具 ----------
+    def _leg_pick(self, leg):
+        return OptionPick(symbol=self.symbol, expiry=self.expiry or '', strike=leg.strike,
+                          put_call=leg.put_call, identifier=leg.identifier)
+
+    @staticmethod
+    def _leg_view(leg, mid):
+        """按腿 side 算正确符号的盈亏，构造 PositionView 喂看板（卖腿盈亏与买腿相反）。"""
+        sgn = 1.0 if leg.side == 'BUY' else -1.0
+        upnl = uppct = None
+        if leg.entry_price:
+            upnl = sgn * (mid - leg.entry_price) * leg.qty * 100
+            uppct = sgn * (mid - leg.entry_price) / leg.entry_price * 100.0
+        return PositionView(quantity=leg.qty, salable_qty=leg.qty,
+                            average_cost=leg.entry_price, market_price=mid,
+                            unrealized_pnl=upnl, unrealized_pnl_percent=uppct)
+
     def _today_date(self):
         import pytz
         tz = pytz.timezone(self._cfg.timezone)
@@ -392,6 +408,16 @@ class CondorManager:
         self._opened_at = self._now_ms()
         self.state = BotState.MONITORING
         self.proposal = None
+        # 落库：每腿写一条持仓（put 腿归第一个 combo、call 腿归第二个），喂看板。
+        put_oid = self.combo_order_ids[0] if self.combo_order_ids else None
+        call_oid = self.combo_order_ids[1] if len(self.combo_order_ids) > 1 else put_oid
+        for leg in self.legs:
+            oid = put_oid if leg.put_call == 'PUT' else call_oid
+            try:
+                self._sink.on_open(self._td.account, self._leg_pick(leg), leg.side,
+                                   leg.qty, leg.entry_price, oid)
+            except Exception as e:  # noqa: BLE001 —— 落库失败不应影响交易
+                logger.warning('on_open 落库失败 %s: %s', leg.identifier, e)
         self._persist()
         logger.warning('铁鹰开仓成交 %s %s 张%s 净权利金/股≈%.2f -> MONITORING',
                        self.symbol, self.expiry, qty, self.entry_credit)
@@ -435,6 +461,16 @@ class CondorManager:
             logger.warning('监控取腿行情失败: %s', e)
             return self._cfg.poll_interval
         close_cost = net_credit(legdicts, qbi, 'mid', closing=True)
+        # 落库：逐腿写持仓走势（自算正确符号盈亏，复用已取的 qbi，无额外券商调用）。
+        for leg in self.legs:
+            mid = _mid(qbi.get(leg.identifier))
+            if mid is None:
+                continue
+            try:
+                self._sink.on_position(self._td.account, self._leg_pick(leg), leg.side,
+                                       leg.entry_price, self._leg_view(leg, mid))
+            except Exception as e:  # noqa: BLE001
+                logger.warning('on_position 落库失败 %s: %s', leg.identifier, e)
         dte = self._dte(self._expiry_date) if self._expiry_date else None
         reason = exit_decision(self.entry_credit, close_cost, dte,
                                self._cfg.condor_profit_target, self._cfg.condor_stop_mult,
@@ -480,6 +516,15 @@ class CondorManager:
                 logger.error('平垂直被拒，将重试: %s', e)
         if all_ok:
             for l in self.legs:
+                # 落库平仓成交（close 价取 mid 近似）+ 清活跃持仓。
+                # 注意：sink.on_close 的 pnl_percent 按多头假设算，SELL 腿的历史$盈亏方向相反——
+                # 看板「实时持仓」用的是 _monitor_once 自算的正确符号视图；历史表此项已知失真。
+                try:
+                    close_px = _mid(qbi.get(l.identifier))
+                    self._sink.on_close(self._td.account, self._leg_pick(l), l.side, l.qty,
+                                        close_px, reason, None, l.entry_price)
+                except Exception as e:  # noqa: BLE001
+                    logger.warning('on_close 落库失败 %s: %s', l.identifier, e)
                 self._sink.on_position_closed(l.identifier)
             self._mark_closed()
             logger.warning('铁鹰已平仓 reason=%s -> CLOSED', reason.value)

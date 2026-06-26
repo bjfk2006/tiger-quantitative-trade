@@ -580,3 +580,76 @@ sudo docker compose up -d --force-recreate     # 生效
 # 验证：当日已亏到上限再开仓会被拦，日志可见
 sudo docker compose logs --since 10m option-bot | grep -i "当日已实现亏损\|stop"
 ```
+
+## 19. 铁鹰卖方策略（condor）：IV 择时 + 人工确认开仓 + 自动出场
+
+定义风险的**双垂直信用价差**（卖近月 ~16Δ 短腿、买外翼）。只在 **IV 够高**时产出开仓**提案**，
+**开仓必须人工 `approve`**；止盈(+50%)/止损(−2×)/到期前(≤21DTE)平仓**自动执行**。一次只持一仓。
+设计见 `docs/design/2026-06-26-condor-premium-selling-engine.md`，策略原理见 `docs/strategy/2026-06-26-iv-timed-defined-risk-premium-selling.md`。
+
+> ⚠️ **务必先 paper 跑通**：combo 净价/动作约定（`_OPEN_ACTION/_CLOSE_ACTION`）须在模拟盘实测确认成交方向与价格符号正确，再考虑实盘。策略 edge 是 in-sample 回测，非盈利保证。**默认用模拟账户（§16.5 `switch-account.sh paper`）。**
+
+### 19.1 开启 condor 模式
+
+`.env` 设 `OBOT_MODE=condor`，配置参数后 `sudo docker compose up -d --build`：
+
+| env | 默认 | 含义 |
+|---|---|---|
+| `OBOT_MODE` | — | 设 `condor` 启用本模式 |
+| `OBOT_CONDOR_UNDERLYING` | SPY | 标的（SPY/QQQ，流动性好） |
+| `OBOT_CONDOR_TARGET_DTE` | 40 | 目标到期天数（30~45） |
+| `OBOT_CONDOR_SHORT_DELTA` | 0.16 | 短腿目标 \|delta\|（~1σ 价外） |
+| `OBOT_CONDOR_WING_WIDTH` | 5 | 翼宽（行权价美元间距） |
+| `OBOT_CONDOR_MIN_IV` | 0.20 | **IV 入场闸**：ATM 隐含波动率下限，低于不开（验证时可调低如 0.05 以便出提案） |
+| `OBOT_CONDOR_PROFIT_TARGET` | 0.5 | 止盈：吃满 50% 权利金平 |
+| `OBOT_CONDOR_STOP_MULT` | 2.0 | 止损：亏达 2× 权利金平 |
+| `OBOT_CONDOR_DTE_EXIT` | 21 | 到期前 N 天平（避 gamma） |
+| `OBOT_CONDOR_MAX_LOSS_PCT` | 0.05 | 单仓最大亏损占账户比例（定张数） |
+| `OBOT_CONDOR_ACCOUNT_EQUITY` | 0 | 账户净值（>0 按风险定张数；0 回退 `OBOT_MAX_QTY`） |
+| `OBOT_CONDOR_PROPOSAL_TTL_MIN` | 10 | 开仓提案有效期（分钟），过期或现价漂移作废重评 |
+
+> condor 模式**不使用** `OBOT_OPEN_ON_START`/`OBOT_DIRECTION/SYMBOL/...`——开仓只走"提案 + 人工 approve"。
+
+### 19.2 生命周期与日志
+
+`IDLE → PROPOSED → MONITORING → CLOSED`。只在**美股常规盘(RTH)**评估提案（每 60s 一次，避 `market_state` 限流）。
+出提案时日志打 `WARNING`，形如：
+```
+★ 铁鹰开仓提案（待人工 approve）: SPY 20260807 DTE42 现价612.3 | 净权利金/股≈1.35 最大亏损/股≈3.65 张数1 | 腿: BUYP590 SELLP595 SELLC630 BUYC635
+```
+看实时：`sudo docker compose logs -f option-bot | grep -E '铁鹰|提案|condor'`。
+
+### 19.3 人工确认开仓（approve / reject）
+
+复用 §16.4 的 `ops()` helper（容器内 `127.0.0.1:8001`，带 `OBOT_OPS_API_KEY`）：
+```bash
+ops /ops/status            # 看当前状态/是否有待批提案（status.proposal）
+ops /ops/approve POST      # ★ 批准 → 提交两个垂直 combo 净限价单 → MONITORING
+ops /ops/reject  POST      # 拒绝当前提案 → 回 IDLE（下轮重评）
+```
+- 批准后引擎按 combo **净限价整笔成交**（不逐腿，保证定义风险）；未在 `fill_timeout` 内成交会提示人工核对挂单。
+- 提案过 `PROPOSAL_TTL_MIN` 分钟自动作废重评，`approve` 过期提案返回"已作废"。
+
+### 19.4 自动出场与手动平仓
+
+- **自动**：每 tick 算当前平仓成本 → 止盈(+50%)/止损(−2×)/到期前(≤21DTE) 命中即**自动平两腿** → CLOSED。日志 `铁鹰触发出场 reason=...`。
+- **手动**：`ops /ops/close POST` 立即市价平掉当前持仓（→ MANUAL）。`ops /ops/stop POST` 停盯盘线程（不平仓）。
+
+### 19.5 combo 下单语义验证（首次实盘前必做，paper）
+
+开盘后等出提案 → `approve` → 查那两个垂直 combo 单，核对方向/类型/净价符号：
+```bash
+# 在容器内用 TradeClient.get_order 查最近订单的 contract_legs / combo_type / limit_price / 成交价
+sudo docker exec option-bot python -c "
+from tigeropen.trade.trade_client import TradeClient
+from option_bot.config.loader import load_client_config_from_env
+import os; tc=TradeClient(load_client_config_from_env(os.environ.get('TIGEROPEN_PROPS_PATH')))
+for o in tc.get_orders(account=tc._account)[:4]:
+    print(o.combo_type, o.limit_price, o.status, getattr(o,'contract_legs',None))
+"
+```
+核对：① 四腿方向（BUY 翼 / SELL 体）正确 ② `combo_type=VERTICAL` ③ **净价为 credit（收款）**。若符号/方向反了，改 `option_bot/strategy/condor.py` 的 `_OPEN_ACTION/_CLOSE_ACTION` 常量后重建再验。验完 `ops /ops/close POST` 平掉。
+
+### 19.6 限制（Phase 1）
+
+只支持**单仓**、固定结构、止盈/止损/到期平仓。**被突破滚动、回撤分级降挡、并发多仓、真 IV-Rank 为 Phase 2 未实现**。实盘前务必先模拟盘验证 combo 语义并小仓试跑。

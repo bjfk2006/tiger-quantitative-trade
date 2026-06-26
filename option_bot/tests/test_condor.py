@@ -183,7 +183,7 @@ def _chain(atm_iv_val=0.30):
     return calls + puts
 
 
-def _make_mgr(tmp, atm_iv_val=0.30, quotes=None):
+def _make_mgr(tmp, atm_iv_val=0.30, quotes=None, sink=None):
     md = MagicMock()
     md.is_market_trading.return_value = True
     md.list_expirations.return_value = [{'date': _date_offset(40)}]
@@ -197,8 +197,28 @@ def _make_mgr(tmp, atm_iv_val=0.30, quotes=None):
     td.new_dedup_tag.return_value = 'tag'
     cfg = StrategyConfig(mode='condor', condor_underlying='SPY', condor_min_iv=0.20)
     mgr = CondorManager(td, md, cfg, MagicMock(), tmp, sleep=lambda *_: None,
-                        now_ms=lambda: NOW)
+                        now_ms=lambda: NOW, sink=sink)
     return mgr, md, td
+
+
+class TestLegView(unittest.TestCase):
+    def test_sell_leg_profit_when_price_drops(self):
+        from option_bot.domain.models import CondorLeg
+        from option_bot.strategy.condor import CondorManager
+        leg = CondorLeg(identifier='P95', put_call='PUT', side='SELL',
+                        strike=95, qty=2, entry_price=1.0)
+        v = CondorManager._leg_view(leg, mid=0.6)   # 卖腿现价跌 → 盈利
+        self.assertAlmostEqual(v.unrealized_pnl, (1.0 - 0.6) * 2 * 100)   # +80
+        self.assertGreater(v.unrealized_pnl_percent, 0)
+
+    def test_buy_leg_loss_when_price_drops(self):
+        from option_bot.domain.models import CondorLeg
+        from option_bot.strategy.condor import CondorManager
+        leg = CondorLeg(identifier='P90', put_call='PUT', side='BUY',
+                        strike=90, qty=2, entry_price=1.0)
+        v = CondorManager._leg_view(leg, mid=0.6)   # 买腿现价跌 → 亏损
+        self.assertAlmostEqual(v.unrealized_pnl, (0.6 - 1.0) * 2 * 100)   # -80
+        self.assertLess(v.unrealized_pnl_percent, 0)
 
 
 class TestCondorManager(unittest.TestCase):
@@ -285,6 +305,34 @@ class TestCondorManager(unittest.TestCase):
         t[0] += 61000
         mgr.run_once()
         self.assertEqual(md.is_market_trading.call_count, 2)  # 过 60s 后再评估
+
+    def test_sink_called_on_open_position_close(self):
+        sink = MagicMock()
+        mgr, md, td = _make_mgr(self._tmp, sink=sink)
+        td.place_combo.side_effect = [111, 222]
+        td.get_order_status.return_value = {'status': 'FILLED', 'filled': 1,
+                                            'remaining': 0, 'avg_fill_price': 0}
+        mgr.run_once()
+        mgr.approve()
+        # 开仓：4 腿各落一条；put 腿归 combo 111，call 腿归 combo 222
+        self.assertEqual(sink.on_open.call_count, 4)
+        oids = {c.args[1].put_call: c.args[5] for c in sink.on_open.call_args_list}
+        self.assertEqual(oids['PUT'], 111)
+        self.assertEqual(oids['CALL'], 222)
+        # 监控一轮：每腿一条持仓走势，view 盈亏符号正确（卖腿现价跌则盈）
+        sink.reset_mock()
+        mgr.run_once()
+        self.assertEqual(sink.on_position.call_count, 4)
+        # 平仓：止盈后每腿 on_close + on_position_closed
+        cheap = {k: {'bid_price': 0.0, 'ask_price': 0.1} for k in
+                 ('P85', 'P90', 'P95', 'P100', 'C100', 'C105', 'C110', 'C115')}
+        md.get_option_quote.side_effect = lambda ident, market='US': cheap.get(ident)
+        td.place_combo.side_effect = [333, 444]
+        sink.reset_mock()
+        mgr.run_once()
+        self.assertEqual(mgr.state, BotState.CLOSED)
+        self.assertEqual(sink.on_close.call_count, 4)
+        self.assertEqual(sink.on_position_closed.call_count, 4)
 
     def test_resume_restores_monitoring(self):
         mgr, _, td = _make_mgr(self._tmp)
