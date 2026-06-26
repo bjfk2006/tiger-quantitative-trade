@@ -32,6 +32,17 @@ class MarketDataAdapter:
         cols = [c for c in ('date', 'timestamp', 'period_tag') if c in df.columns]
         return df[cols].to_dict('records')
 
+    def get_underlying_price(self, symbol, market=Market.US):
+        """标的现价（latest_price）；取不到返回 None。"""
+        try:
+            df = self._qc.get_stock_briefs([symbol])
+        except (RequestException, ResponseException, ApiException) as e:
+            raise DataUnavailable(f'获取标的现价失败: {e}')
+        if df is None or getattr(df, 'empty', True):
+            return None
+        r = df.iloc[0].to_dict()
+        return r.get('latest_price') or r.get('close') or r.get('pre_close')
+
     def get_chain(self, symbol, expiry, put_call=None, market=Market.US):
         """返回期权链 records；put_call 给定时按方向过滤（CALL/PUT）。"""
         try:

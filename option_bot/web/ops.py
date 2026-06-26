@@ -8,8 +8,8 @@ import logging
 
 from flask import Flask, jsonify, request
 
-from option_bot.service import (CMD_CLOSE, CMD_DISABLE_OPEN, CMD_ENABLE_OPEN,
-                                CMD_STOP)
+from option_bot.service import (CMD_APPROVE, CMD_CLOSE, CMD_DISABLE_OPEN,
+                                CMD_ENABLE_OPEN, CMD_REJECT, CMD_STOP)
 from option_bot.web.auth import check_apikey, extract_apikey, mask_key
 
 logger = logging.getLogger('option_bot.web.ops')
@@ -52,5 +52,15 @@ def create_ops_app(command_queue, repo, api_key, status_provider=None):
     @app.route('/ops/stop', methods=['POST'])
     def stop():
         return _enqueue(CMD_STOP)
+
+    @app.route('/ops/approve', methods=['POST'])
+    def approve():
+        """铁鹰：人工批准当前开仓提案。"""
+        return _enqueue(CMD_APPROVE)
+
+    @app.route('/ops/reject', methods=['POST'])
+    def reject():
+        """铁鹰：拒绝当前开仓提案。"""
+        return _enqueue(CMD_REJECT)
 
     return app

@@ -30,7 +30,10 @@ CMD_CLOSE = 'close'
 CMD_DISABLE_OPEN = 'disable_open'
 CMD_ENABLE_OPEN = 'enable_open'
 CMD_STOP = 'stop'
-VALID_COMMANDS = {CMD_CLOSE, CMD_DISABLE_OPEN, CMD_ENABLE_OPEN, CMD_STOP}
+CMD_APPROVE = 'approve'   # 铁鹰：人工批准开仓提案
+CMD_REJECT = 'reject'     # 铁鹰：拒绝开仓提案
+VALID_COMMANDS = {CMD_CLOSE, CMD_DISABLE_OPEN, CMD_ENABLE_OPEN, CMD_STOP,
+                  CMD_APPROVE, CMD_REJECT}
 
 
 class CommandQueue:
@@ -242,6 +245,17 @@ def build_bot_from_env(env_get=os.environ.get):
         breakeven_lock=_f(env_get('OBOT_BREAKEVEN_LOCK'), 0.0),
         max_hold_minutes=_f(env_get('OBOT_MAX_HOLD_MINUTES'), 0.0),
         mode=env_get('OBOT_MODE') or 'single',
+        condor_underlying=env_get('OBOT_CONDOR_UNDERLYING') or 'SPY',
+        condor_target_dte=_i(env_get('OBOT_CONDOR_TARGET_DTE'), 40),
+        condor_short_delta=_f(env_get('OBOT_CONDOR_SHORT_DELTA'), 0.16),
+        condor_wing_width=_f(env_get('OBOT_CONDOR_WING_WIDTH'), 5.0),
+        condor_min_iv=_f(env_get('OBOT_CONDOR_MIN_IV'), 0.20),
+        condor_profit_target=_f(env_get('OBOT_CONDOR_PROFIT_TARGET'), 0.5),
+        condor_stop_mult=_f(env_get('OBOT_CONDOR_STOP_MULT'), 2.0),
+        condor_dte_exit=_i(env_get('OBOT_CONDOR_DTE_EXIT'), 21),
+        condor_max_loss_pct=_f(env_get('OBOT_CONDOR_MAX_LOSS_PCT'), 0.05),
+        condor_account_equity=_f(env_get('OBOT_CONDOR_ACCOUNT_EQUITY'), 0.0),
+        condor_proposal_ttl_min=_f(env_get('OBOT_CONDOR_PROPOSAL_TTL_MIN'), 10.0),
         leg_stop=_f(env_get('OBOT_STRADDLE_LEG_STOP'), 10.0),
         straddle_tp_mode=env_get('OBOT_STRADDLE_TP_MODE') or 'trailing',
         straddle_tp=_f(env_get('OBOT_STRADDLE_TP'), 10.0),
@@ -271,6 +285,14 @@ def build_bot_from_env(env_get=os.environ.get):
         sup = StraddleSupervisor(mgr, cfg, cmd_queue, open_spec=s_open,
                                  allow_live_open=_b(env_get('OBOT_ALLOW_LIVE_AUTO_OPEN')),
                                  is_paper=config.is_paper)
+        return sup, repo, cmd_queue
+
+    # ---- 铁鹰(condor)卖方模式 ----
+    if (cfg.mode or 'single').lower() == 'condor':
+        from option_bot.strategy.condor import CondorManager, CondorSupervisor
+        condor_state = state_file.rsplit('.json', 1)[0] + '_condor.json'
+        mgr = CondorManager(td, md, cfg, MarketClock(md, cfg), condor_state, sink=sink)
+        sup = CondorSupervisor(mgr, cfg, cmd_queue)
         return sup, repo, cmd_queue
 
     # ---- 单腿模式（默认）----

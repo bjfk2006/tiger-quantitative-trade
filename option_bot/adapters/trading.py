@@ -11,7 +11,8 @@ import uuid
 from tigeropen.common.consts import SecurityType
 from tigeropen.common.exceptions import ApiException, RequestException, ResponseException
 from tigeropen.common.util.contract_utils import option_contract_by_symbol
-from tigeropen.common.util.order_utils import market_order
+from tigeropen.common.util.order_utils import combo_order, market_order
+from tigeropen.trade.domain.contract import OrderContractLeg
 
 from option_bot.adapters.errors import CloseRejected, DataUnavailable, OpenRejected
 from option_bot.domain.models import OptionPick, PositionView
@@ -67,6 +68,33 @@ class TradingAdapter:
         if not order_id:
             raise CloseRejected('平仓下单未返回订单 id')
         logger.info('平仓已提交 order_id=%s mark=%s', order_id, user_mark)
+        return order_id
+
+    def place_combo(self, symbol, expiry, legs, combo_type, action, qty,
+                    limit_price, user_mark, currency='USD', multiplier=100, market='US'):
+        """多腿组合**净限价**下单（铁鹰用，定义风险整笔成交）。返回订单 id。
+
+        legs: [{'put_call','side'(BUY/SELL),'strike','ratio'}]。
+        limit_price 为**组合净价**（卖方信用价差取负=收款，见 SDK 示例 limit_price=-2.52）。
+        ⚠️ 净价正负/combo action 的具体约定须先在 **paper 账户**验证后再实盘。
+        """
+        contract_legs = [
+            OrderContractLeg(symbol=symbol, sec_type='OPT', expiry=expiry,
+                             strike=str(lg['strike']), put_call=lg['put_call'].upper(),
+                             action=lg['side'].upper(), ratio=int(lg.get('ratio', 1)),
+                             market=market, currency=currency, multiplier=multiplier)
+            for lg in legs]
+        order = combo_order(self._account, contract_legs, combo_type, action, qty,
+                            limit_price=limit_price)
+        order.user_mark = user_mark
+        try:
+            order_id = self._tc.place_order(order)
+        except (ApiException, RequestException, ResponseException) as e:
+            raise OpenRejected(f'组合下单被拒: {e}')
+        if not order_id:
+            raise OpenRejected('组合下单未返回订单 id')
+        logger.info('组合单已提交 order_id=%s type=%s action=%s qty=%s limit=%s mark=%s',
+                    order_id, combo_type, action, qty, limit_price, user_mark)
         return order_id
 
     def get_order_status(self, order_id: int) -> dict:

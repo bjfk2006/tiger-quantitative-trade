@@ -24,6 +24,7 @@ class Direction(Enum):
 class BotState(Enum):
     """单持仓生命周期状态（设计文档 §5）。"""
     IDLE = 'IDLE'
+    PROPOSED = 'PROPOSED'      # 已产出开仓提案，等待人工 approve（铁鹰卖方用）
     OPENING = 'OPENING'
     MONITORING = 'MONITORING'
     CLOSING = 'CLOSING'
@@ -94,8 +95,21 @@ class StrategyConfig:
     breakeven_lock: float = 0.0
     # 持仓时长上限（分钟）：0=关闭
     max_hold_minutes: float = 0.0
+    # ---- 铁鹰(condor)卖方模式（设计：2026-06-26-condor-premium-selling-engine.md）----
+    # 定义风险的双垂直信用价差：卖近月 ~short_delta 短腿、买 wing 外翼；IV 高才提案、人工确认开仓。
+    condor_underlying: str = 'SPY'        # 标的（SPY/QQQ）
+    condor_target_dte: int = 40           # 目标到期天数（30~45）
+    condor_short_delta: float = 0.16      # 短腿目标 |delta|（~1σ 价外）
+    condor_wing_width: float = 5.0        # 翼宽（行权价美元间距）
+    condor_min_iv: float = 0.20           # IV 入场闸：ATM 隐含波动率绝对下限
+    condor_profit_target: float = 0.5     # 止盈：吃到 50% 权利金即平
+    condor_stop_mult: float = 2.0         # 止损：亏到 2× 权利金即平
+    condor_dte_exit: int = 21             # 到期前 N 天平仓（避 gamma）
+    condor_max_loss_pct: float = 0.05     # 单仓最大亏损占账户比例（仓位上限）
+    condor_account_equity: float = 0.0    # 账户净值（用于按 max_loss_pct 定张数；0=回退 max_qty）
+    condor_proposal_ttl_min: float = 10.0 # 开仓提案有效期（分钟），过期或现价漂移则作废重评
     # ---- 双向跨式(straddle)多腿模式 ----
-    mode: str = 'single'              # single（单腿）/ straddle（call+put 双腿）
+    mode: str = 'single'              # single（单腿）/ straddle（call+put 双腿）/ condor（铁鹰卖方）
     leg_stop: float = 10.0            # 单腿止损%（亏到即平该腿）
     straddle_tp_mode: str = 'trailing'  # 组合止盈：fixed / trailing
     straddle_tp: float = 10.0         # fixed：组合止盈%（总成本占比）
@@ -155,6 +169,41 @@ class TradeSnapshot:
     @classmethod
     def from_dict(cls, d: dict) -> 'TradeSnapshot':
         # 忽略未知字段，向后兼容快照结构演进
+        valid = cls.__dataclass_fields__.keys()
+        return cls(**{k: v for k, v in d.items() if k in valid})
+
+
+@dataclass
+class CondorLeg:
+    """铁鹰的一条腿。side: 'BUY'(买翼)/'SELL'(卖体)。"""
+    identifier: str
+    put_call: str          # CALL / PUT
+    side: str              # BUY / SELL
+    strike: float
+    qty: int
+    entry_price: Optional[float] = None   # 该腿成交价（参考）
+
+
+@dataclass
+class CondorSnapshot:
+    """铁鹰持仓崩溃恢复快照。legs 为 CondorLeg.__dict__ 列表。"""
+    account: str
+    symbol: str
+    expiry: str                # YYYYMMDD
+    qty: int
+    legs: list
+    entry_credit: float        # 每张净收权利金（每股口径）
+    max_loss: float            # 每张最大亏损（每股口径）= 翼宽 − entry_credit
+    state: str
+    opened_at: Optional[int]
+    external_id: Optional[str]
+    combo_order_ids: list = field(default_factory=list)
+
+    def to_dict(self) -> dict:
+        return asdict(self)
+
+    @classmethod
+    def from_dict(cls, d: dict) -> 'CondorSnapshot':
         valid = cls.__dataclass_fields__.keys()
         return cls(**{k: v for k, v in d.items() if k in valid})
 
