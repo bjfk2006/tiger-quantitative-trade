@@ -232,6 +232,10 @@ class CondorManager:
         self.combo_order_ids = []
         self._opened_at = None
         self._tag = None
+        # 提案评估限频：market_state 等接口限流(~10/min)，IDLE 时每 60s 评估一次即可
+        self._last_propose_ms = 0
+        self._propose_throttle_ms = 60000
+        self._idle_interval = 5.0   # IDLE/PROPOSED 轮询间隔(秒)，保证 approve 命令及时响应
 
     # ---------- 工具 ----------
     def _today_date(self):
@@ -411,13 +415,16 @@ class CondorManager:
                 self.proposal = None
                 self.state = BotState.IDLE
                 self._persist()
-            return self._cfg.poll_interval
+            return self._idle_interval
         if self.state in (BotState.IDLE, BotState.CLOSED):
-            try:
-                self._try_propose()
-            except Exception as e:  # noqa: BLE001 —— 提案失败不应杀线程
-                logger.warning('提案评估异常: %s', e)
-        return self._cfg.poll_interval
+            now = self._now_ms()
+            if now - self._last_propose_ms >= self._propose_throttle_ms:
+                self._last_propose_ms = now
+                try:
+                    self._try_propose()
+                except Exception as e:  # noqa: BLE001 —— 提案失败不应杀线程
+                    logger.warning('提案评估异常: %s', e)
+        return self._idle_interval
 
     def _monitor_once(self):
         legdicts = [{'identifier': l.identifier, 'side': l.side,

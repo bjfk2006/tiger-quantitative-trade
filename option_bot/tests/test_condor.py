@@ -274,6 +274,18 @@ class TestCondorManager(unittest.TestCase):
         mgr.run_once()                       # 监控 → 止盈 → 平仓
         self.assertEqual(mgr.state, BotState.CLOSED)
 
+    def test_propose_throttled(self):
+        # market_state 限流：IDLE 时 60s 内只评估一次
+        mgr, md, _ = _make_mgr(self._tmp, atm_iv_val=0.10)  # 低 IV → 不提案、保持 IDLE
+        t = [NOW]
+        mgr._now_ms = lambda: t[0]
+        mgr.run_once()
+        mgr.run_once()
+        self.assertEqual(md.is_market_trading.call_count, 1)  # 第二次被限频
+        t[0] += 61000
+        mgr.run_once()
+        self.assertEqual(md.is_market_trading.call_count, 2)  # 过 60s 后再评估
+
     def test_resume_restores_monitoring(self):
         mgr, _, td = _make_mgr(self._tmp)
         td.place_combo.side_effect = [111, 222]
