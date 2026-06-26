@@ -608,8 +608,13 @@ sudo docker compose logs --since 10m option-bot | grep -i "当日已实现亏损
 | `OBOT_CONDOR_MAX_LOSS_PCT` | 0.05 | 单仓最大亏损占账户比例（定张数） |
 | `OBOT_CONDOR_ACCOUNT_EQUITY` | 0 | 账户净值（>0 按风险定张数；0 回退 `OBOT_MAX_QTY`） |
 | `OBOT_CONDOR_PROPOSAL_TTL_MIN` | 10 | 开仓提案有效期（分钟），过期或现价漂移作废重评 |
+| `OBOT_CONDOR_SYNTHETIC_GREEKS` | true | 券商无逐档 delta 时按 BS 自算（平价反推现价+briefs平值IV/利率）；false=只用券商 greeks |
+| `OBOT_CONDOR_RISK_FREE` | 0 | 合成 delta 用无风险利率；0=用 briefs `rates_bonds`，>0 覆盖 |
+| `OBOT_CONDOR_OPEN_COMBO_TYPE` | CUSTOM | 开仓单类型：`CUSTOM`=单笔 4 腿原子单（避免两垂直间半成交）；`VERTICAL`=两个垂直（回退） |
 
 > condor 模式**不使用** `OBOT_OPEN_ON_START`/`OBOT_DIRECTION/SYMBOL/...`——开仓只走"提案 + 人工 approve"。
+> **合成 greeks**：本项目部署的 HK paper 账户行情不返回逐档 delta（chain.delta 全 0、briefs 只给标的平值 IV），
+> 默认开启 BS 合成兜底才能出提案；详见 `docs/design/2026-06-26-condor-synthetic-greeks-fallback.md`。
 
 ### 19.2 生命周期与日志
 
@@ -633,23 +638,26 @@ ops /ops/reject  POST      # 拒绝当前提案 → 回 IDLE（下轮重评）
 
 ### 19.4 自动出场与手动平仓
 
-- **自动**：每 tick 算当前平仓成本 → 止盈(+50%)/止损(−2×)/到期前(≤21DTE) 命中即**自动平两腿** → CLOSED。日志 `铁鹰触发出场 reason=...`。
-- **手动**：`ops /ops/close POST` 立即市价平掉当前持仓（→ MANUAL）。`ops /ops/stop POST` 停盯盘线程（不平仓）。
+- **自动**：每 tick 算当前平仓成本 → 止盈(+50%)/止损(−2×)/到期前(≤21DTE) 命中即**自动平仓** → CLOSED。日志 `铁鹰触发出场 reason=...`。平仓用**翻转每条腿 BUY/SELL 的反向 combo**（CUSTOM 单笔或 VERTICAL 两单，与开仓单类型一致），不依赖"组合 action 翻转"。
+- **手动**：`ops /ops/close POST` 平掉当前持仓。`ops /ops/stop POST` 停盯盘线程（不平仓）。
+- **半成交回滚**：approve 时若开仓单未在 `fill_timeout` 内成交，**自动撤单**；若有腿已成交则**逐腿反向市价拉平**，回到 IDLE，绝不留孤儿仓（日志 `撤单/回滚`）。
+- **恢复对账**：重启 `resume()` 会逐腿与券商持仓核对方向，不一致则进 `ERROR` 态**待人工核对、不自动出场**（日志 `恢复对账失败...ERROR`）。
 
-### 19.5 combo 下单语义验证（首次实盘前必做，paper）
+### 19.5 combo 下单语义（2026-06-26 paper 已验证 ✓）
 
-开盘后等出提案 → `approve` → 查那两个垂直 combo 单，核对方向/类型/净价符号：
+开仓语义已实测确认：`combo_type` 正确、四腿方向正确（BUY 翼 / SELL 体）、`action='BUY'` + **净价为负=收款（信用）**，成交 `avg_fill<0`=收到权利金。验证回单：
 ```bash
-# 在容器内用 TradeClient.get_order 查最近订单的 contract_legs / combo_type / limit_price / 成交价
-sudo docker exec option-bot python -c "
+sudo docker exec -i option-bot python - <<'PY'
+import os
 from tigeropen.trade.trade_client import TradeClient
 from option_bot.config.loader import load_client_config_from_env
-import os; tc=TradeClient(load_client_config_from_env(os.environ.get('TIGEROPEN_PROPS_PATH')))
-for o in tc.get_orders(account=tc._account)[:4]:
-    print(o.combo_type, o.limit_price, o.status, getattr(o,'contract_legs',None))
-"
+cfg=load_client_config_from_env(props_path=os.environ['TIGEROPEN_PROPS_PATH']); tc=TradeClient(cfg)
+for o in tc.get_orders(account=cfg.account)[:4]:
+    print(getattr(o,'combo_type',None), getattr(o,'limit_price',None),
+          getattr(o,'status',None), getattr(o,'contract_legs',None))
+PY
 ```
-核对：① 四腿方向（BUY 翼 / SELL 体）正确 ② `combo_type=VERTICAL` ③ **净价为 credit（收款）**。若符号/方向反了，改 `option_bot/strategy/condor.py` 的 `_OPEN_ACTION/_CLOSE_ACTION` 常量后重建再验。验完 `ops /ops/close POST` 平掉。
+**仍待 paper 验证（实现已就绪）**：① CUSTOM 4 腿是否原子成交、净价符号；② 翻转腿平仓后持仓**归 0**（非 2×）；③ 未成交→自动撤单+回滚无残仓。验证计划见 `docs/design/2026-06-26-condor-combo-robustness.md` §4。
 
 ### 19.6 限制（Phase 1）
 

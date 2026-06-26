@@ -2,14 +2,22 @@
 """铁鹰卖方策略纯决策核心单测。设计：2026-06-26-condor-premium-selling-engine.md。"""
 import unittest
 
-from option_bot.domain.models import CloseReason
+from option_bot.domain.models import CloseReason, PositionView
 from option_bot.strategy.condor import (atm_iv, bs_delta, build_condor,
                                         condor_max_loss, enrich_greeks,
                                         exit_decision, greeks_missing,
                                         implied_spot, net_credit,
                                         nearest_strike_row, norm_cdf, _parse_pct,
-                                        passes_entry_gate, select_by_delta,
-                                        size_by_max_loss)
+                                        _reverse_legs, passes_entry_gate,
+                                        select_by_delta, size_by_max_loss)
+
+
+def _pos_side_effect(long_strikes):
+    """构造 get_option_position 的 side_effect：long_strikes 内为多头(+1)，其余空头(-1)。"""
+    def _pos(pick, *a, **k):
+        q = 1 if float(pick.strike) in long_strikes else -1
+        return PositionView(q, abs(q), 1.0, 1.0, 0.0, 0.0)
+    return _pos
 
 
 def row(ident, pc, strike, delta, iv=0.3, bid=1.0, ask=1.2):
@@ -198,7 +206,8 @@ def _make_mgr(tmp, atm_iv_val=0.30, quotes=None, sink=None):
     td = MagicMock()
     td.account = 'paper-1'
     td.new_dedup_tag.return_value = 'tag'
-    cfg = StrategyConfig(mode='condor', condor_underlying='SPY', condor_min_iv=0.20)
+    cfg = StrategyConfig(mode='condor', condor_underlying='SPY', condor_min_iv=0.20,
+                         fill_timeout=0.05, fill_poll_interval=0.0)
     mgr = CondorManager(td, md, cfg, MagicMock(), tmp, sleep=lambda *_: None,
                         now_ms=lambda: NOW, sink=sink)
     return mgr, md, td
@@ -283,6 +292,16 @@ class TestSyntheticGreeks(unittest.TestCase):
         self.assertLess(rows[1]['delta'], 0)       # 缺失的 put 被填为负 delta
 
 
+class TestReverseLegs(unittest.TestCase):
+    def test_reverse_flips_each_side(self):
+        legs = [{'identifier': 'P90', 'side': 'BUY', 'put_call': 'PUT', 'strike': 90},
+                {'identifier': 'P95', 'side': 'SELL', 'put_call': 'PUT', 'strike': 95}]
+        rev = _reverse_legs(legs)
+        self.assertEqual([l['side'] for l in rev], ['SELL', 'BUY'])
+        self.assertEqual(legs[0]['side'], 'BUY')           # 原列表不被改
+        self.assertEqual([l['identifier'] for l in rev], ['P90', 'P95'])
+
+
 class TestLegView(unittest.TestCase):
     def test_sell_leg_profit_when_price_drops(self):
         from option_bot.domain.models import CondorLeg
@@ -325,18 +344,67 @@ class TestCondorManager(unittest.TestCase):
         self.assertEqual(mgr.state, BotState.IDLE)
         self.assertIsNone(mgr.proposal)
 
-    def test_approve_submits_two_verticals_and_monitors(self):
+    def test_approve_custom_single_atomic_combo(self):
+        # 默认 CUSTOM：单笔 4 腿原子单
         mgr, _, td = _make_mgr(self._tmp)
-        td.place_combo.side_effect = [111, 222]
+        td.place_combo.side_effect = [777]
         td.get_order_status.return_value = {'status': 'FILLED', 'filled': 1,
                                             'remaining': 0, 'avg_fill_price': 0}
-        mgr.run_once()                       # → PROPOSED
+        mgr.run_once()
         ok, _ = mgr.approve()
         self.assertTrue(ok)
         self.assertEqual(mgr.state, BotState.MONITORING)
-        self.assertEqual(td.place_combo.call_count, 2)   # 两个垂直
+        self.assertEqual(td.place_combo.call_count, 1)        # 一单四腿
+        self.assertEqual(len(mgr.legs), 4)
+        self.assertEqual(mgr.combo_order_ids, [777])
+        # combo_type=CUSTOM、四腿、净价为负(信用)
+        args = td.place_combo.call_args
+        self.assertEqual(args.args[3], 'CUSTOM')
+        self.assertEqual(len(args.args[2]), 4)
+        self.assertLess(args.args[6], 0)
+
+    def test_approve_vertical_fallback_two_combos(self):
+        mgr, _, td = _make_mgr(self._tmp)
+        mgr._cfg.condor_open_combo_type = 'VERTICAL'
+        td.place_combo.side_effect = [111, 222]
+        td.get_order_status.return_value = {'status': 'FILLED', 'filled': 1,
+                                            'remaining': 0, 'avg_fill_price': 0}
+        mgr.run_once()
+        ok, _ = mgr.approve()
+        self.assertTrue(ok)
+        self.assertEqual(mgr.state, BotState.MONITORING)
+        self.assertEqual(td.place_combo.call_count, 2)        # 两个垂直
         self.assertEqual(len(mgr.legs), 4)
         self.assertEqual(mgr.combo_order_ids, [111, 222])
+
+    def test_approve_custom_not_filled_cancels_and_idles(self):
+        # CUSTOM 未成交 → 撤单 + 回 IDLE，无孤儿
+        mgr, _, td = _make_mgr(self._tmp)
+        td.place_combo.side_effect = [777]
+        td.get_order_status.return_value = {'status': 'HELD', 'filled': 0,
+                                            'remaining': 1, 'avg_fill_price': 0}
+        mgr.run_once()
+        ok, msg = mgr.approve()
+        self.assertFalse(ok)
+        self.assertEqual(mgr.state, BotState.IDLE)
+        td.cancel_order.assert_called_once_with(777)
+        self.assertEqual(len(mgr.legs), 0)
+
+    def test_approve_vertical_partial_fill_rolls_back(self):
+        # VERTICAL：put 成交、call 未成交 → 撤 call + 逐腿回滚已成交 put + 回 IDLE
+        mgr, _, td = _make_mgr(self._tmp)
+        mgr._cfg.condor_open_combo_type = 'VERTICAL'
+        td.place_combo.side_effect = [111, 222]
+        statuses = [{'status': 'FILLED', 'filled': 1, 'remaining': 0, 'avg_fill_price': 0},
+                    {'status': 'HELD', 'filled': 0, 'remaining': 1, 'avg_fill_price': 0}]
+        td.get_order_status.side_effect = lambda oid: statuses[0] if oid == 111 else statuses[1]
+        mgr.run_once()
+        ok, _ = mgr.approve()
+        self.assertFalse(ok)
+        self.assertEqual(mgr.state, BotState.IDLE)
+        td.cancel_order.assert_called_once_with(222)
+        # 已成交的 put 垂直两腿被逐腿反向市价回滚
+        self.assertEqual(td.flatten_leg.call_count, 2)
 
     def test_reject_returns_idle(self):
         mgr, _, _ = _make_mgr(self._tmp)
@@ -396,11 +464,11 @@ class TestCondorManager(unittest.TestCase):
                                             'remaining': 0, 'avg_fill_price': 0}
         mgr.run_once()
         mgr.approve()
-        # 开仓：4 腿各落一条；put 腿归 combo 111，call 腿归 combo 222
+        # 开仓(默认 CUSTOM 单笔)：4 腿各落一条，全部归唯一 combo 111
         self.assertEqual(sink.on_open.call_count, 4)
         oids = {c.args[1].put_call: c.args[5] for c in sink.on_open.call_args_list}
         self.assertEqual(oids['PUT'], 111)
-        self.assertEqual(oids['CALL'], 222)
+        self.assertEqual(oids['CALL'], 111)
         # 监控一轮：每腿一条持仓走势，view 盈亏符号正确（卖腿现价跌则盈）
         sink.reset_mock()
         mgr.run_once()
@@ -478,15 +546,36 @@ class TestCondorManager(unittest.TestCase):
 
     def test_resume_restores_monitoring(self):
         mgr, _, td = _make_mgr(self._tmp)
-        td.place_combo.side_effect = [111, 222]
+        td.place_combo.side_effect = [777]
         td.get_order_status.return_value = {'status': 'FILLED', 'filled': 1,
                                             'remaining': 0, 'avg_fill_price': 0}
         mgr.run_once(); mgr.approve()
-        # 新建一个 manager 从快照恢复
-        mgr2, _, _ = _make_mgr(self._tmp)
+        # 新建一个 manager 从快照恢复；券商持仓与快照一致(90/110多、95/105空) → MONITORING
+        mgr2, _, td2 = _make_mgr(self._tmp)
+        td2.get_option_position.side_effect = _pos_side_effect({90.0, 110.0})
         self.assertTrue(mgr2.resume())
         self.assertEqual(mgr2.state, BotState.MONITORING)
         self.assertEqual(len(mgr2.legs), 4)
+
+    def test_resume_reconcile_mismatch_halts_to_error(self):
+        mgr, _, td = _make_mgr(self._tmp)
+        td.place_combo.side_effect = [777]
+        td.get_order_status.return_value = {'status': 'FILLED', 'filled': 1,
+                                            'remaining': 0, 'avg_fill_price': 0}
+        mgr.run_once(); mgr.approve()
+        mgr2, _, td2 = _make_mgr(self._tmp)
+        # 短腿 95 在券商缺失 → 对账不符 → ERROR(待人工)，不自动 MONITORING
+        def pos(pick, *a, **k):
+            if float(pick.strike) == 95.0:
+                return None
+            q = 1 if float(pick.strike) in (90.0, 110.0) else -1
+            return PositionView(q, abs(q), 1.0, 1.0, 0.0, 0.0)
+        td2.get_option_position.side_effect = pos
+        self.assertTrue(mgr2.resume())
+        self.assertEqual(mgr2.state, BotState.ERROR)
+        # ERROR 态 run_once 不做任何自动动作
+        mgr2.run_once()
+        self.assertEqual(td2.place_combo.call_count, 0)
 
 
 if __name__ == '__main__':

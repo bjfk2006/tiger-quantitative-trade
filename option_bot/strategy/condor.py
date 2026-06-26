@@ -26,10 +26,21 @@ logger = logging.getLogger('option_bot.condor')
 
 _FILLED = 'FILLED'
 _COMBO_VERTICAL = 'VERTICAL'
-# ⚠️ 组合净价/动作约定：按 SDK 示例(action='BUY', 信用价差 limit 取负=收款)。
-#    务必先在 paper 账户验证成交方向/价格符号正确，再用于实盘。
+_COMBO_CUSTOM = 'CUSTOM'        # 单笔 4 腿原子组合（避免两垂直间半成交）
+# combo 动作/净价约定（2026-06-26 paper 实测确认）：action='BUY'，开仓 limit 取负=收款(信用)，
+# 成交 avg_fill 为负=收到权利金。平仓镜像之：显式翻转每条腿 BUY/SELL，action='BUY'，limit 取正=付债买回。
 _OPEN_ACTION = 'BUY'
-_CLOSE_ACTION = 'SELL'
+
+
+def _reverse_legs(legs):
+    """翻转每条腿 BUY<->SELL（平仓/回滚：把"开仓腿动作"变成"减仓腿动作"）。"""
+    flip = {'BUY': 'SELL', 'SELL': 'BUY'}
+    out = []
+    for l in legs:
+        nl = dict(l)
+        nl['side'] = flip.get(str(l['side']).upper(), str(l['side']).upper())
+        out.append(nl)
+    return out
 
 
 # ==================== ① 纯决策核心（可单测，无 SDK） ====================
@@ -489,7 +500,10 @@ class CondorManager:
 
     # ---------- 人工确认 ----------
     def approve(self):
-        """人工批准开仓：提交两个垂直 combo 净限价单。返回 (ok, msg)。"""
+        """人工批准开仓。开仓单类型由 condor_open_combo_type 决定（CUSTOM 原子 / VERTICAL 回退）。
+
+        失败时 _submit_open 已撤单/回滚干净，状态回 IDLE，绝不留孤儿仓。返回 (ok, msg)。
+        """
         if self.state != BotState.PROPOSED or self.proposal is None:
             return False, '当前无待批提案'
         if self._proposal_stale():
@@ -499,32 +513,22 @@ class CondorManager:
             return False, '提案已过期，已作废（下轮重评）'
         p = self.proposal
         legs = p['legs']
-        put_legs = [l for l in legs if l['put_call'] == 'PUT']    # BUY low + SELL high = 牛市认沽信用
-        call_legs = [l for l in legs if l['put_call'] == 'CALL']  # SELL low + BUY high = 熊市认购信用
         qty = int(p['qty'])
         self._tag = self._td.new_dedup_tag()
-        self.combo_order_ids = []
         try:
             qbi = self._quotes_for(legs)
         except DataUnavailable as e:
             return False, f'批准时取行情失败: {e}'
-        for vlegs in (put_legs, call_legs):
-            vcredit = net_credit(vlegs, qbi, 'mid', closing=False)
-            if vcredit is None:
-                return False, '批准时垂直腿行情缺失'
-            # 信用价差：净价取负=收款（见 _OPEN_ACTION 注释，需 paper 验证）
-            limit = -round(abs(vcredit), 2)
-            try:
-                oid = self._td.place_combo(self.symbol, self.expiry, vlegs, _COMBO_VERTICAL,
-                                           _OPEN_ACTION, qty, limit, self._td.new_dedup_tag())
-            except OpenRejected as e:
-                return False, f'垂直 combo 开仓被拒: {e}'
-            st = self._await_fill(oid)
-            self.combo_order_ids.append(oid)
-            if st['status'] != _FILLED and (st.get('filled') or 0) <= 0:
-                logger.error('垂直 combo 未成交 order_id=%s —— 需人工核对挂单', oid)
-                return False, f'垂直 combo 未在 {self._cfg.fill_timeout}s 内成交，请人工核对'
+        ok, order_ids = self._submit_open(legs, qty, qbi)
+        if not ok:
+            # _submit_open 内已撤单/回滚已成交腿；作废提案回 IDLE，下轮重评
+            self.proposal = None
+            self.state = BotState.IDLE
+            self.combo_order_ids = []
+            self._persist()
+            return False, '开仓未完成（已撤单/回滚），回到 IDLE'
         # 成交：登记腿、进入监控
+        self.combo_order_ids = order_ids
         self.qty = qty
         self.entry_credit = p['credit']
         self.max_loss = p['max_loss']
@@ -535,11 +539,13 @@ class CondorManager:
         self._opened_at = self._now_ms()
         self.state = BotState.MONITORING
         self.proposal = None
-        # 落库：每腿写一条持仓（put 腿归第一个 combo、call 腿归第二个），喂看板。
-        put_oid = self.combo_order_ids[0] if self.combo_order_ids else None
-        call_oid = self.combo_order_ids[1] if len(self.combo_order_ids) > 1 else put_oid
+        # 落库：CUSTOM 全部腿归唯一 oid；VERTICAL put 腿归 oid[0]、call 腿归 oid[1]
+        is_custom = len(order_ids) == 1
         for leg in self.legs:
-            oid = put_oid if leg.put_call == 'PUT' else call_oid
+            if is_custom:
+                oid = order_ids[0]
+            else:
+                oid = order_ids[0] if leg.put_call == 'PUT' else order_ids[-1]
             try:
                 self._sink.on_open(self._td.account, self._leg_pick(leg), leg.side,
                                    leg.qty, leg.entry_price, oid)
@@ -549,6 +555,93 @@ class CondorManager:
         logger.warning('铁鹰开仓成交 %s %s 张%s 净权利金/股≈%.2f -> MONITORING',
                        self.symbol, self.expiry, qty, self.entry_credit)
         return True, '已开仓，进入监控'
+
+    # ---------- 开仓提交（原子/回退）+ 半成交回滚 ----------
+    def _submit_open(self, legs, qty, qbi):
+        """按 condor_open_combo_type 提交开仓。返回 (ok, order_ids)。失败时已撤单/回滚。"""
+        if (self._cfg.condor_open_combo_type or 'CUSTOM').upper() == _COMBO_VERTICAL:
+            return self._open_vertical(legs, qty, qbi)
+        return self._open_custom(legs, qty, qbi)
+
+    def _open_custom(self, legs, qty, qbi):
+        """单笔 4 腿 CUSTOM 原子开仓。未成交则撤单 + 防竞态复查 + 必要回滚。"""
+        total = net_credit(legs, qbi, 'mid')
+        if total is None:
+            logger.error('CUSTOM 开仓行情缺失，放弃')
+            return False, []
+        limit = -round(abs(total), 2)        # 负=收款(信用)
+        try:
+            oid = self._td.place_combo(self.symbol, self.expiry, legs, _COMBO_CUSTOM,
+                                       _OPEN_ACTION, qty, limit, self._td.new_dedup_tag())
+        except OpenRejected as e:
+            logger.error('CUSTOM 开仓被拒: %s', e)
+            return False, []
+        if self._await_fill(oid)['status'] == _FILLED:
+            return True, [oid]
+        logger.error('CUSTOM 开仓未在 %ss 内成交，撤单回滚', self._cfg.fill_timeout)
+        self._cancel_quiet(oid)
+        if self._poll_filled(oid):           # 撤单/成交竞态：撤后仍成交则逐腿拉平
+            logger.error('CUSTOM 撤单后仍成交，逐腿回滚')
+            self._unwind(legs, qty)
+        return False, []
+
+    def _open_vertical(self, legs, qty, qbi):
+        """回退：两个垂直 combo。任一未成交则撤该单 + 回滚已成交的另一垂直。"""
+        puts = [l for l in legs if l['put_call'] == 'PUT']
+        calls = [l for l in legs if l['put_call'] == 'CALL']
+        order_ids = []
+        filled = []                          # 已成交垂直的腿，失败时回滚
+        for vlegs in (puts, calls):
+            vcredit = net_credit(vlegs, qbi, 'mid')
+            if vcredit is None:
+                logger.error('垂直腿行情缺失，回滚已成交腿')
+                self._unwind([l for g in filled for l in g], qty)
+                return False, order_ids
+            limit = -round(abs(vcredit), 2)
+            try:
+                oid = self._td.place_combo(self.symbol, self.expiry, vlegs, _COMBO_VERTICAL,
+                                           _OPEN_ACTION, qty, limit, self._td.new_dedup_tag())
+            except OpenRejected as e:
+                logger.error('垂直 combo 开仓被拒: %s，回滚已成交腿', e)
+                self._unwind([l for g in filled for l in g], qty)
+                return False, order_ids
+            order_ids.append(oid)
+            if self._await_fill(oid)['status'] == _FILLED:
+                filled.append(vlegs)
+            else:
+                logger.error('垂直 combo 未成交 oid=%s，撤单 + 回滚', oid)
+                self._cancel_quiet(oid)
+                if self._poll_filled(oid):
+                    filled.append(vlegs)
+                self._unwind([l for g in filled for l in g], qty)
+                return False, order_ids
+        return True, order_ids
+
+    def _cancel_quiet(self, oid):
+        try:
+            self._td.cancel_order(oid)
+        except (CloseRejected, DataUnavailable) as e:  # 可能已成交/已撤
+            logger.warning('撤单失败 oid=%s: %s', oid, e)
+
+    def _poll_filled(self, oid):
+        """复查某单是否（部分）成交（撤单后防竞态）。"""
+        try:
+            st = self._td.get_order_status(oid)
+        except DataUnavailable:
+            return False
+        return st['status'] == _FILLED or (st.get('filled') or 0) > 0
+
+    def _unwind(self, legs, qty):
+        """逐腿反向市价拉平已成交腿（开仓BUY→SELL平、开仓SELL→BUY平）。减风险优先。"""
+        for l in legs:
+            pick = OptionPick(symbol=self.symbol, expiry=self.expiry or '',
+                              strike=l['strike'], put_call=l['put_call'], identifier=l['identifier'])
+            close_act = 'SELL' if str(l['side']).upper() == 'BUY' else 'BUY'
+            try:
+                self._td.flatten_leg(pick, close_act, qty, self._td.new_dedup_tag())
+                logger.warning('回滚已成交腿 %s %s', close_act, l['identifier'])
+            except (CloseRejected, OpenRejected) as e:
+                logger.error('回滚腿失败 %s: %s —— 需人工核对持仓!', l['identifier'], e)
 
     def reject(self):
         if self.state != BotState.PROPOSED:
@@ -612,7 +705,11 @@ class CondorManager:
         return self._cfg.poll_interval
 
     def _close_all(self, reason, qbi=None):
-        """平掉两个垂直（反向 combo 净限价）。"""
+        """平仓：显式翻转每条腿 BUY/SELL 的反向 combo（镜像开仓，不依赖组合 action 翻转）。
+
+        分组同开仓单类型：CUSTOM=单笔 4 腿；VERTICAL=两个垂直。净价取正=付债买回。
+        任一未成交则不进 CLOSED，下个 tick 重试。
+        """
         if not self.legs:
             self._mark_closed()
             return
@@ -622,25 +719,31 @@ class CondorManager:
             except DataUnavailable as e:
                 logger.error('平仓取行情失败，下个 tick 重试: %s', e)
                 return
-        puts = [l for l in self.legs if l.put_call == 'PUT']
-        calls = [l for l in self.legs if l.put_call == 'CALL']
+        if (self._cfg.condor_open_combo_type or 'CUSTOM').upper() == _COMBO_VERTICAL:
+            groups = [[l for l in self.legs if l.put_call == 'PUT'],
+                      [l for l in self.legs if l.put_call == 'CALL']]
+            ctype = _COMBO_VERTICAL
+        else:
+            groups = [list(self.legs)]
+            ctype = _COMBO_CUSTOM
         all_ok = True
-        for vlegs in (puts, calls):
-            ld = [{'identifier': l.identifier, 'side': l.side,
-                   'put_call': l.put_call, 'strike': l.strike} for l in vlegs]
-            cost = net_credit(ld, qbi, 'mid', closing=True)
-            limit = round(abs(cost), 2) if cost is not None else None
+        for grp in groups:
+            open_ld = [{'identifier': l.identifier, 'side': l.side,
+                        'put_call': l.put_call, 'strike': l.strike} for l in grp]
+            close_ld = _reverse_legs(open_ld)                 # 翻转腿动作 = 减仓
+            val = net_credit(open_ld, qbi, 'mid')             # 该组当前净值(信用结构为正)
+            limit = round(abs(val), 2) if val is not None else None
             try:
-                oid = self._td.place_combo(self.symbol, self.expiry, ld, _COMBO_VERTICAL,
-                                           _CLOSE_ACTION, self.qty, limit,
+                oid = self._td.place_combo(self.symbol, self.expiry, close_ld, ctype,
+                                           _OPEN_ACTION, self.qty, limit,   # action=BUY + 正净价=付债买回
                                            self._td.new_dedup_tag())
                 st = self._await_fill(oid)
                 if st['status'] != _FILLED:
                     all_ok = False
-                    logger.error('平垂直未确认成交 order_id=%s，下个 tick 重试', oid)
+                    logger.error('平仓 combo 未确认成交 order_id=%s，下个 tick 重试', oid)
             except (OpenRejected, CloseRejected) as e:
                 all_ok = False
-                logger.error('平垂直被拒，将重试: %s', e)
+                logger.error('平仓 combo 被拒，将重试: %s', e)
         if all_ok:
             for l in self.legs:
                 # 落库平仓成交（close 价取 mid 近似）+ 清活跃持仓。
@@ -695,9 +798,36 @@ class CondorManager:
         self.entry_credit, self.max_loss = snap.entry_credit, snap.max_loss
         self._opened_at, self._tag = snap.opened_at, snap.external_id
         self.combo_order_ids = snap.combo_order_ids or []
+        # 与券商持仓逐腿对账：不一致则进 ERROR 待人工核对，不自动出场（防基于错误状态乱平）
+        ok, mismatches = self._reconcile_legs()
+        if not ok:
+            self.state = BotState.ERROR
+            logger.error('铁鹰恢复对账失败，进入 ERROR 待人工核对: %s', '; '.join(mismatches))
+            self._persist()
+            return True
         self.state = BotState.MONITORING
         logger.info('已恢复铁鹰 %s %s 张%s -> MONITORING', self.symbol, self.expiry, self.qty)
         return True
+
+    def _reconcile_legs(self):
+        """逐腿与券商持仓核对方向（BUY→应多头、SELL→应空头）。返回 (matched, mismatches)。
+
+        取不到行情/持仓的腿跳过（不误判为不符）；仅在券商**确凿**无此腿或方向相反时判不符。
+        """
+        mismatches = []
+        for l in self.legs:
+            try:
+                view = self._td.get_option_position(self._leg_pick(l))
+            except DataUnavailable:
+                continue
+            qtyv = getattr(view, 'quantity', None) if view else None
+            want_long = str(l.side).upper() == 'BUY'
+            if not qtyv:
+                mismatches.append(f'{l.identifier} 券商无持仓')
+            elif (qtyv > 0) != want_long:
+                mismatches.append(
+                    f'{l.identifier} 方向不符(应{"多" if want_long else "空"},qty={qtyv})')
+        return (not mismatches), mismatches
 
     def _snapshot(self):
         return CondorSnapshot(

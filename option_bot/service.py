@@ -258,6 +258,7 @@ def build_bot_from_env(env_get=os.environ.get):
         condor_proposal_ttl_min=_f(env_get('OBOT_CONDOR_PROPOSAL_TTL_MIN'), 10.0),
         condor_synthetic_greeks=_b(env_get('OBOT_CONDOR_SYNTHETIC_GREEKS'), True),
         condor_risk_free=_f(env_get('OBOT_CONDOR_RISK_FREE'), 0.0),
+        condor_open_combo_type=(env_get('OBOT_CONDOR_OPEN_COMBO_TYPE') or 'CUSTOM').upper(),
         leg_stop=_f(env_get('OBOT_STRADDLE_LEG_STOP'), 10.0),
         straddle_tp_mode=env_get('OBOT_STRADDLE_TP_MODE') or 'trailing',
         straddle_tp=_f(env_get('OBOT_STRADDLE_TP'), 10.0),

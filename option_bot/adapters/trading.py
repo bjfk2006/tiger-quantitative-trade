@@ -97,6 +97,36 @@ class TradingAdapter:
                     order_id, combo_type, action, qty, limit_price, user_mark)
         return order_id
 
+    def cancel_order(self, order_id: int) -> None:
+        """撤单（半成交回滚/清理悬空挂单用）。撤单失败抛 CloseRejected。"""
+        try:
+            self._tc.cancel_order(account=self._account, id=order_id)
+        except (ApiException, RequestException, ResponseException) as e:
+            raise CloseRejected(f'撤单被拒: {e}')
+        logger.info('撤单已提交 order_id=%s', order_id)
+
+    def flatten_leg(self, pick: OptionPick, action: str, qty: int, user_mark: str) -> int:
+        """单腿**显式方向**市价平/回滚（仅减仓用：SELL 平多头、BUY 平空头）。返回订单 id。
+
+        与 open_market/close_market 不同，本方法允许 BUY-to-close 空头腿，专供铁鹰
+        半成交回滚/紧急拉平——只用于**减少**已存在的腿，不开新仓。
+        """
+        act = str(action).upper()
+        if act not in ('BUY', 'SELL'):
+            raise CloseRejected(f'flatten_leg 非法方向: {action}')
+        contract = self._build_contract(pick)
+        order = market_order(self._account, contract, act, qty)
+        order.user_mark = user_mark
+        try:
+            order_id = self._tc.place_order(order)
+        except (ApiException, RequestException, ResponseException) as e:
+            raise CloseRejected(f'回滚平腿被拒: {e}')
+        if not order_id:
+            raise CloseRejected('回滚平腿未返回订单 id')
+        logger.info('回滚平腿已提交 order_id=%s %s %s 张%s mark=%s',
+                    order_id, act, pick.identifier, qty, user_mark)
+        return order_id
+
     def get_order_status(self, order_id: int) -> dict:
         """返回 {'status': str, 'filled': float, 'remaining': float, 'avg_fill_price': float}。"""
         try:
