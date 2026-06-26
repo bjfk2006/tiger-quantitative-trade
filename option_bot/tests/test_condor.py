@@ -3,10 +3,13 @@
 import unittest
 
 from option_bot.domain.models import CloseReason
-from option_bot.strategy.condor import (atm_iv, build_condor, condor_max_loss,
-                                        exit_decision, net_credit,
-                                        nearest_strike_row, passes_entry_gate,
-                                        select_by_delta, size_by_max_loss)
+from option_bot.strategy.condor import (atm_iv, bs_delta, build_condor,
+                                        condor_max_loss, enrich_greeks,
+                                        exit_decision, greeks_missing,
+                                        implied_spot, net_credit,
+                                        nearest_strike_row, norm_cdf, _parse_pct,
+                                        passes_entry_gate, select_by_delta,
+                                        size_by_max_loss)
 
 
 def row(ident, pc, strike, delta, iv=0.3, bid=1.0, ask=1.2):
@@ -201,6 +204,85 @@ def _make_mgr(tmp, atm_iv_val=0.30, quotes=None, sink=None):
     return mgr, md, td
 
 
+class TestSyntheticGreeks(unittest.TestCase):
+    def test_parse_pct(self):
+        self.assertAlmostEqual(_parse_pct('16.65%'), 0.1665)
+        self.assertAlmostEqual(_parse_pct('0%'), 0.0)
+        self.assertAlmostEqual(_parse_pct(0.1665), 0.1665)
+        self.assertAlmostEqual(_parse_pct('0.2'), 0.2)
+        self.assertIsNone(_parse_pct(None))
+        self.assertIsNone(_parse_pct('abc'))
+
+    def test_norm_cdf(self):
+        self.assertAlmostEqual(norm_cdf(0.0), 0.5)
+        self.assertGreater(norm_cdf(1.0), 0.84)
+        self.assertLess(norm_cdf(-1.0), 0.16)
+
+    def test_bs_delta_atm_and_wings(self):
+        # ATM call delta 略 >0.5（含漂移）；ATM put 略 >-0.5
+        cd = bs_delta(100, 100, 0.1, 0.2, 0.04, 'CALL')
+        pd = bs_delta(100, 100, 0.1, 0.2, 0.04, 'PUT')
+        self.assertTrue(0.5 < cd < 0.62)
+        self.assertTrue(-0.5 < pd < -0.38)
+        # 深 ITM call → ~1；深 OTM call → ~0
+        self.assertGreater(bs_delta(100, 50, 0.5, 0.2, 0.0, 'CALL'), 0.98)
+        self.assertLess(bs_delta(100, 200, 0.5, 0.2, 0.0, 'CALL'), 0.02)
+        # put 恒为负
+        self.assertLess(bs_delta(100, 90, 0.3, 0.25, 0.0, 'PUT'), 0)
+
+    def test_bs_delta_bad_inputs(self):
+        self.assertIsNone(bs_delta(0, 100, 0.1, 0.2, 0.0, 'CALL'))
+        self.assertIsNone(bs_delta(100, 100, 0.0, 0.2, 0.0, 'CALL'))
+        self.assertIsNone(bs_delta(100, 100, 0.1, 0.0, 0.0, 'CALL'))
+        self.assertIsNone(bs_delta(100, 100, 0.1, None, 0.0, 'CALL'))
+
+    def test_greeks_missing(self):
+        self.assertTrue(greeks_missing([row('A', 'CALL', 100, 0.0), row('B', 'PUT', 95, 0.0)]))
+        self.assertTrue(greeks_missing([{'identifier': 'A', 'delta': None}]))
+        self.assertFalse(greeks_missing([row('A', 'CALL', 100, 0.0), row('B', 'CALL', 100, 0.3)]))
+
+    def test_implied_spot_parity(self):
+        # 构造 spot=732 的链：call_mid - put_mid + K ≈ 732
+        rows = []
+        spot = 732.0
+        for k in range(700, 765, 5):
+            cmid = max(0.5, spot - k) + 8.0   # 粗略：内在 + 时间价值
+            pmid = max(0.5, k - spot) + 8.0
+            rows.append({'identifier': f'C{k}', 'put_call': 'CALL', 'strike': k,
+                         'bid_price': cmid - 0.1, 'ask_price': cmid + 0.1})
+            rows.append({'identifier': f'P{k}', 'put_call': 'PUT', 'strike': k,
+                         'bid_price': pmid - 0.1, 'ask_price': pmid + 0.1})
+        self.assertAlmostEqual(implied_spot(rows), spot, delta=1.0)
+
+    def test_enrich_greeks_enables_delta_selection(self):
+        # 全 0 delta 的链，enrich 后能按 16Δ 选出合理短腿
+        spot, iv, t, r = 732.0, 0.1665, 42 / 365.0, 0.04
+        rows = []
+        for k in range(680, 790, 5):
+            rows.append({'identifier': f'C{k}', 'put_call': 'CALL', 'strike': float(k),
+                         'delta': 0.0, 'implied_vol': 0.0, 'bid_price': 1.0, 'ask_price': 1.2})
+            rows.append({'identifier': f'P{k}', 'put_call': 'PUT', 'strike': float(k),
+                         'delta': 0.0, 'implied_vol': 0.0, 'bid_price': 1.0, 'ask_price': 1.2})
+        n = enrich_greeks(rows, spot, iv, t, r)
+        self.assertEqual(n, len(rows))
+        puts = [r for r in rows if r['put_call'] == 'PUT']
+        calls = [r for r in rows if r['put_call'] == 'CALL']
+        ps = select_by_delta(puts, 0.16, 'PUT')
+        cs = select_by_delta(calls, 0.16, 'CALL')
+        # 16Δ put 在现价下方、16Δ call 在上方，且大致对称价外
+        self.assertLess(ps['strike'], spot)
+        self.assertGreater(cs['strike'], spot)
+        self.assertTrue(685 <= ps['strike'] <= 710)
+        self.assertTrue(765 <= cs['strike'] <= 790)
+
+    def test_enrich_preserves_real_delta(self):
+        rows = [row('C', 'CALL', 100, 0.30), {'identifier': 'P', 'put_call': 'PUT',
+                'strike': 95.0, 'delta': 0.0, 'bid_price': 1, 'ask_price': 1.2}]
+        enrich_greeks(rows, 100, 0.2, 0.1, 0.0)
+        self.assertEqual(rows[0]['delta'], 0.30)   # 真 delta 不被覆盖
+        self.assertLess(rows[1]['delta'], 0)       # 缺失的 put 被填为负 delta
+
+
 class TestLegView(unittest.TestCase):
     def test_sell_leg_profit_when_price_drops(self):
         from option_bot.domain.models import CondorLeg
@@ -333,6 +415,66 @@ class TestCondorManager(unittest.TestCase):
         self.assertEqual(mgr.state, BotState.CLOSED)
         self.assertEqual(sink.on_close.call_count, 4)
         self.assertEqual(sink.on_position_closed.call_count, 4)
+
+    def test_synthetic_greeks_path_proposes(self):
+        # 券商无逐档 delta（chain.delta 全 0）+ 股票行情被拒 → 走 BS 合成兜底出提案
+        from option_bot.adapters.errors import DataUnavailable
+        spot = 100.0
+        ch = []
+        for k in range(75, 130, 5):
+            tv = round(max(0.2, 5.0 - 0.18 * abs(k - spot)), 2)        # 时间价值，越价外越小
+            cmid = tv + max(0.0, spot - k)                              # 平价：call=tv+内在
+            pmid = tv + max(0.0, k - spot)
+            ch.append({'identifier': f'C{k}', 'put_call': 'CALL', 'strike': float(k),
+                       'delta': 0.0, 'implied_vol': 0.0,
+                       'bid_price': round(cmid - 0.1, 2), 'ask_price': round(cmid + 0.1, 2),
+                       'latest_price': cmid})
+            ch.append({'identifier': f'P{k}', 'put_call': 'PUT', 'strike': float(k),
+                       'delta': 0.0, 'implied_vol': 0.0,
+                       'bid_price': round(pmid - 0.1, 2), 'ask_price': round(pmid + 0.1, 2),
+                       'latest_price': pmid})
+        md = MagicMock()
+        md.is_market_trading.return_value = True
+        md.list_expirations.return_value = [{'date': _date_offset(40)}]
+        md.get_chain.return_value = ch
+        md.get_underlying_price.side_effect = DataUnavailable('no stock perm')
+        qmap = {r['identifier']: {'bid_price': r['bid_price'], 'ask_price': r['ask_price'],
+                                  'volatility': '30%', 'rates_bonds': 0.04} for r in ch}
+        md.get_option_quote.side_effect = lambda ident, market='US': qmap.get(ident)
+        td = MagicMock(); td.account = 'paper-1'; td.new_dedup_tag.return_value = 'tag'
+        cfg = StrategyConfig(mode='condor', condor_underlying='SPY', condor_min_iv=0.20,
+                             condor_synthetic_greeks=True)
+        mgr = CondorManager(td, md, cfg, MagicMock(), self._tmp,
+                            sleep=lambda *_: None, now_ms=lambda: NOW)
+        mgr.run_once()
+        self.assertEqual(mgr.state, BotState.PROPOSED)
+        self.assertEqual(len(mgr.proposal['legs']), 4)
+        self.assertAlmostEqual(mgr.proposal['iv'], 0.30, places=4)
+        self.assertAlmostEqual(mgr.proposal['spot'], spot, delta=1.0)   # 平价反推现价
+        self.assertGreater(mgr.proposal['credit'], 0)
+
+    def test_synthetic_disabled_keeps_idle_when_no_greeks(self):
+        # 关闭合成 + 券商无 delta → 选不出腿，保持 IDLE（验证开关）
+        ch = []
+        for k in range(80, 125, 5):
+            ch.append({'identifier': f'C{k}', 'put_call': 'CALL', 'strike': float(k),
+                       'delta': 0.0, 'implied_vol': 0.0, 'bid_price': 1.0, 'ask_price': 1.2})
+            ch.append({'identifier': f'P{k}', 'put_call': 'PUT', 'strike': float(k),
+                       'delta': 0.0, 'implied_vol': 0.0, 'bid_price': 1.0, 'ask_price': 1.2})
+        md = MagicMock()
+        md.is_market_trading.return_value = True
+        md.list_expirations.return_value = [{'date': _date_offset(40)}]
+        md.get_chain.return_value = ch
+        md.get_underlying_price.return_value = 100.0
+        md.get_option_quote.side_effect = lambda ident, market='US': {'bid_price': 1.0, 'ask_price': 1.2}
+        td = MagicMock(); td.account = 'paper-1'
+        cfg = StrategyConfig(mode='condor', condor_underlying='SPY', condor_min_iv=0.20,
+                             condor_synthetic_greeks=False)
+        mgr = CondorManager(td, md, cfg, MagicMock(), self._tmp,
+                            sleep=lambda *_: None, now_ms=lambda: NOW)
+        mgr.run_once()
+        self.assertEqual(mgr.state, BotState.IDLE)
+        self.assertIsNone(mgr.proposal)
 
     def test_resume_restores_monitoring(self):
         mgr, _, td = _make_mgr(self._tmp)

@@ -208,8 +208,8 @@ def _i(v, default):
         return default
 
 
-def _b(v):
-    return str(v).lower() in ('1', 'true', 'yes', 'on') if v is not None else False
+def _b(v, default=False):
+    return str(v).lower() in ('1', 'true', 'yes', 'on') if v not in (None, '') else default
 
 
 def _load_json(path):
@@ -256,6 +256,8 @@ def build_bot_from_env(env_get=os.environ.get):
         condor_max_loss_pct=_f(env_get('OBOT_CONDOR_MAX_LOSS_PCT'), 0.05),
         condor_account_equity=_f(env_get('OBOT_CONDOR_ACCOUNT_EQUITY'), 0.0),
         condor_proposal_ttl_min=_f(env_get('OBOT_CONDOR_PROPOSAL_TTL_MIN'), 10.0),
+        condor_synthetic_greeks=_b(env_get('OBOT_CONDOR_SYNTHETIC_GREEKS'), True),
+        condor_risk_free=_f(env_get('OBOT_CONDOR_RISK_FREE'), 0.0),
         leg_stop=_f(env_get('OBOT_STRADDLE_LEG_STOP'), 10.0),
         straddle_tp_mode=env_get('OBOT_STRADDLE_TP_MODE') or 'trailing',
         straddle_tp=_f(env_get('OBOT_STRADDLE_TP'), 10.0),

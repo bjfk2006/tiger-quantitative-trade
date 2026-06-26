@@ -108,6 +108,8 @@ class StrategyConfig:
     condor_max_loss_pct: float = 0.05     # 单仓最大亏损占账户比例（仓位上限）
     condor_account_equity: float = 0.0    # 账户净值（用于按 max_loss_pct 定张数；0=回退 max_qty）
     condor_proposal_ttl_min: float = 10.0 # 开仓提案有效期（分钟），过期或现价漂移则作废重评
+    condor_synthetic_greeks: bool = True  # 券商无逐档 delta 时按 BS 自算（平价反推现价+briefs平值IV）
+    condor_risk_free: float = 0.0         # 合成 delta 用无风险利率；0=用 briefs rates_bonds，>0 覆盖
     # ---- 双向跨式(straddle)多腿模式 ----
     mode: str = 'single'              # single（单腿）/ straddle（call+put 双腿）/ condor（铁鹰卖方）
     leg_stop: float = 10.0            # 单腿止损%（亏到即平该腿）

@@ -12,6 +12,7 @@
 import datetime as _dt
 import json
 import logging
+import math
 import os
 import tempfile
 import time
@@ -200,6 +201,93 @@ def exit_decision(entry_credit, close_cost, dte, profit_target=0.5,
     return None
 
 
+# ---------- 合成希腊字母兜底（券商无逐档 delta 时按 Black-Scholes 自算）----------
+# 设计：docs/design/2026-06-26-condor-synthetic-greeks-fallback.md
+# 起因：HK paper 账户行情不返回逐档 delta/IV（chain.delta 全 0、briefs 只给标的平值
+# volatility），无法按 16Δ 选腿。兜底：put-call 平价反推现价 + briefs 平值 IV/利率，BS 自算 delta。
+
+def _parse_pct(x):
+    """'16.65%' → 0.1665；已是小数则原样；None/非数 → None。"""
+    if x is None:
+        return None
+    if isinstance(x, str):
+        s = x.strip()
+        if s.endswith('%'):
+            v = _num(s[:-1])
+            return None if v is None else v / 100.0
+        return _num(s)
+    return _num(x)
+
+
+def norm_cdf(x):
+    """标准正态 CDF（用 math.erf，不引 scipy）。"""
+    return 0.5 * (1.0 + math.erf(x / math.sqrt(2.0)))
+
+
+def bs_delta(spot, strike, t_years, iv, r, put_call):
+    """Black-Scholes delta（call 正、put 负）。参数非法返回 None。"""
+    s, k, t, sig = _num(spot), _num(strike), _num(t_years), _num(iv)
+    rr = _num(r) or 0.0
+    if not (s and k and t and sig) or s <= 0 or k <= 0 or t <= 0 or sig <= 0:
+        return None
+    d1 = (math.log(s / k) + (rr + 0.5 * sig * sig) * t) / (sig * math.sqrt(t))
+    nd1 = norm_cdf(d1)
+    return nd1 if str(put_call).upper() == 'CALL' else nd1 - 1.0
+
+
+def greeks_missing(chain_rows):
+    """链中是否无任何可用逐档 delta（全为 None/0）→ 需启用合成兜底。"""
+    for r in chain_rows:
+        if _num(r.get('delta')):    # 非 None 且非 0
+            return False
+    return True
+
+
+def implied_spot(chain_rows):
+    """put-call 平价反推现价：近 ATM（|C−P| 最小）若干档取 S≈C_mid−P_mid+K 的中位数。
+
+    抗噪：只用买卖价均 >0 的档；深 ITM 报价陈旧故按 |C−P| 排序取最接近平值的前若干档。
+    无可用档返回 None。
+    """
+    by_k = {}
+    for r in chain_rows:
+        k = _num(r.get('strike'))
+        if k is None:
+            continue
+        m = _mid(r)
+        if m is None or m <= 0:
+            continue
+        pc = str(r.get('put_call', '')).upper()
+        by_k.setdefault(k, {})[pc] = m
+    ests = []
+    for k, pc in by_k.items():
+        c, p = pc.get('CALL'), pc.get('PUT')
+        if c and p:
+            ests.append((abs(c - p), c - p + k))   # 按 |C−P| 近平值排序，S≈C−P+K
+    if not ests:
+        return None
+    ests.sort(key=lambda e: e[0])
+    svals = sorted(e[1] for e in ests[:8])
+    n = len(svals)
+    return svals[n // 2] if n % 2 else (svals[n // 2 - 1] + svals[n // 2]) / 2.0
+
+
+def enrich_greeks(chain_rows, spot, iv, t_years, r):
+    """对缺失/为 0 delta 的行就地填入 BS 自算 delta，并补 implied_vol。返回填充行数。"""
+    n = 0
+    for row in chain_rows:
+        if _num(row.get('delta')):      # 已有真 delta，跳过
+            continue
+        d = bs_delta(spot, _num(row.get('strike')), t_years, iv, r, row.get('put_call'))
+        if d is None:
+            continue
+        row['delta'] = d
+        if not _num(row.get('implied_vol')):
+            row['implied_vol'] = iv
+        n += 1
+    return n
+
+
 # ==================== ② IO 编排：CondorManager / CondorSupervisor ====================
 
 class CondorManager:
@@ -287,6 +375,30 @@ class CondorManager:
             q[ident] = self._md.get_option_quote(ident, market='US')
         return q
 
+    def _fetch_iv_rate(self, chain, spot):
+        """取最接近现价一档的 brief，解析平值 IV(volatility) 与无风险利率(rates_bonds)。
+
+        账户的 volatility 是标的层面单值(全链同值)，故取近 ATM 一档即可。返回 (iv, r)。
+        """
+        best, best_d = None, None
+        for r in chain:
+            k = _num(r.get('strike'))
+            ident = r.get('identifier')
+            if k is None or not ident:
+                continue
+            d = abs(k - spot) if spot else 0.0
+            if best is None or d < best_d:
+                best, best_d = str(ident).strip(), d
+        if not best:
+            return None, None
+        try:
+            q = self._md.get_option_quote(best, market='US')
+        except DataUnavailable:
+            return None, None
+        if not q:
+            return None, None
+        return _parse_pct(q.get('volatility')), _num(q.get('rates_bonds'))
+
     # ---------- 提案（自动） ----------
     def _try_propose(self):
         if not self._md.is_market_trading('US'):
@@ -300,7 +412,22 @@ class CondorManager:
         except DataUnavailable as e:
             logger.warning('提案取链失败: %s', e)
             return
-        iv = atm_iv(chain)
+        # 合成 greeks 兜底：券商无逐档 delta 时按 BS 自算（平价反推现价 + briefs 平值IV/利率）
+        spot = None
+        if self._cfg.condor_synthetic_greeks and greeks_missing(chain):
+            spot = implied_spot(chain)
+            iv, rate = self._fetch_iv_rate(chain, spot)
+            dte_now = self._dte(self._expiry_date)
+            if spot is None or iv is None or not dte_now or dte_now <= 0:
+                logger.info('合成 greeks 失败：现价/IV/DTE 不可得(spot=%s iv=%s dte=%s)',
+                            spot, iv, dte_now)
+                return
+            r_used = self._cfg.condor_risk_free or rate or 0.0
+            filled = enrich_greeks(chain, spot, iv, dte_now / 365.0, r_used)
+            logger.info('合成 greeks：现价≈%.2f IV=%.4f r=%.4f DTE=%s 填充%d行',
+                        spot, iv, r_used, dte_now, filled)
+        else:
+            iv = atm_iv(chain)
         ok, reason = passes_entry_gate(iv, self._cfg.condor_min_iv, True, False)
         if not ok:
             logger.info('铁鹰入场闸未过: %s', reason)
@@ -328,11 +455,11 @@ class CondorManager:
         if qty < 1:
             logger.info('按风险预算定出张数<1，放弃')
             return
-        spot = None
-        try:
-            spot = self._md.get_underlying_price(self.symbol)
-        except DataUnavailable:
-            pass
+        if spot is None:   # 合成路径已用平价反推出 spot；否则取标的现价（若有权限）
+            try:
+                spot = self._md.get_underlying_price(self.symbol)
+            except DataUnavailable:
+                pass
         self.expiry = self._expiry_date.replace('-', '')
         self.proposal = {
             'legs': legs, 'credit': round(credit, 4), 'mid_credit': net_credit(legs, qbi, 'mid'),
