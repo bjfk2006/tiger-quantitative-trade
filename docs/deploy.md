@@ -662,3 +662,18 @@ PY
 ### 19.6 限制（Phase 1）
 
 只支持**单仓**、固定结构、止盈/止损/到期平仓。**被突破滚动、回撤分级降挡、并发多仓、真 IV-Rank 为 Phase 2 未实现**。实盘前务必先模拟盘验证 combo 语义并小仓试跑。
+
+## 20. 影子追踪器（shadow）：纯观察验证盈利模式，零下单
+
+`option_bot/shadow.py`。等引擎入场条件满足（RTH + IV≥`OBOT_CONDOR_MIN_IV`）时**锁定**当时的铁鹰结构，之后定时盯市记录盈亏走势、按设计出场规则（+50%止盈/−2×止损/≤21DTE）判定，**只读市场数据、绝不下单/不建 TradeClient**。用于确认"该机会按设计是否如预测获利"。状态机 `WAITING→TRACKING→CLOSED`，先跟完第一条机会。
+
+```bash
+# 容器内
+docker exec option-bot python -m option_bot.shadow sample   # 推进一步（cron 每 10 分钟跑）
+docker exec option-bot python -m option_bot.shadow report   # 看锁定结构 + 走势 + 结果
+docker exec option-bot python -m option_bot.shadow reset    # 清空重来
+```
+- 状态文件 `/app/data/shadow_condor.json`（OBOT_SHADOW_FILE 覆盖），跨重建保留。
+- cron（root，每 10 分钟）：`*/10 * * * * /usr/bin/docker exec option-bot python -m option_bot.shadow sample >> /var/log/condor_shadow.log 2>&1`。off-hours/IV 不够时自动空转（不锁定）。
+- 盈亏正=权利金衰减获利（符合卖方盈利模式）；`report` 的 OUTCOME 显示该机会最终走到止盈/止损/到期。
+- 影子与真实交易**完全解耦**：不影响引擎、不下单；可与 paper 引擎同时跑。
