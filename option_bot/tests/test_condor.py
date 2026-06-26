@@ -357,11 +357,13 @@ class TestCondorManager(unittest.TestCase):
         self.assertEqual(td.place_combo.call_count, 1)        # 一单四腿
         self.assertEqual(len(mgr.legs), 4)
         self.assertEqual(mgr.combo_order_ids, [777])
-        # combo_type=CUSTOM、四腿、净价为负(信用)
+        # combo_type=CUSTOM、四腿、净价=marketable 保守信用(非 mid)
         args = td.place_combo.call_args
         self.assertEqual(args.args[3], 'CUSTOM')
         self.assertEqual(len(args.args[2]), 4)
-        self.assertLess(args.args[6], 0)
+        # _chain: 保守开仓信用 = (P95.bid1.0+C105.bid1.0) − (P90.ask0.6+C110.ask0.6) = 0.8
+        # （mid 会是 1.2；用保守=可成交）→ limit = -0.8
+        self.assertAlmostEqual(args.args[6], -0.8, places=2)
 
     def test_approve_vertical_fallback_two_combos(self):
         mgr, _, td = _make_mgr(self._tmp)

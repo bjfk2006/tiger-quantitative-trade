@@ -565,9 +565,11 @@ class CondorManager:
 
     def _open_custom(self, legs, qty, qbi):
         """单笔 4 腿 CUSTOM 原子开仓。未成交则撤单 + 防竞态复查 + 必要回滚。"""
-        total = net_credit(legs, qbi, 'mid')
-        if total is None:
-            logger.error('CUSTOM 开仓行情缺失，放弃')
+        # marketable 限价：用保守信用(卖腿吃 bid/买腿付 ask)，跨价差才成交；
+        # 入场闸已保证保守信用>0，故成交后仍正期望。mid 限价几乎不成交（实测）。
+        total = net_credit(legs, qbi, 'conservative', closing=False)
+        if total is None or total <= 0:
+            logger.error('CUSTOM 开仓保守信用不可得/非正(%s)，放弃', total)
             return False, []
         limit = -round(abs(total), 2)        # 负=收款(信用)
         try:
@@ -592,9 +594,9 @@ class CondorManager:
         order_ids = []
         filled = []                          # 已成交垂直的腿，失败时回滚
         for vlegs in (puts, calls):
-            vcredit = net_credit(vlegs, qbi, 'mid')
-            if vcredit is None:
-                logger.error('垂直腿行情缺失，回滚已成交腿')
+            vcredit = net_credit(vlegs, qbi, 'conservative', closing=False)   # marketable
+            if vcredit is None or vcredit <= 0:
+                logger.error('垂直腿保守信用不可得/非正(%s)，回滚已成交腿', vcredit)
                 self._unwind([l for g in filled for l in g], qty)
                 return False, order_ids
             limit = -round(abs(vcredit), 2)
@@ -731,7 +733,8 @@ class CondorManager:
             open_ld = [{'identifier': l.identifier, 'side': l.side,
                         'put_call': l.put_call, 'strike': l.strike} for l in grp]
             close_ld = _reverse_legs(open_ld)                 # 翻转腿动作 = 减仓
-            val = net_credit(open_ld, qbi, 'mid')             # 该组当前净值(信用结构为正)
+            # marketable 平仓限价：保守平仓成本(买回卖腿付 ask/卖出买腿收 bid)，跨价差才成交
+            val = net_credit(open_ld, qbi, 'conservative', closing=True)
             limit = round(abs(val), 2) if val is not None else None
             try:
                 oid = self._td.place_combo(self.symbol, self.expiry, close_ld, ctype,
