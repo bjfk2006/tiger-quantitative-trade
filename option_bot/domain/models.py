@@ -110,6 +110,7 @@ class StrategyConfig:
     condor_proposal_ttl_min: float = 10.0 # 开仓提案有效期（分钟），过期或现价漂移则作废重评
     condor_synthetic_greeks: bool = True  # 券商无逐档 delta 时按 BS 自算（平价反推现价+briefs平值IV）
     condor_risk_free: float = 0.0         # 合成 delta 用无风险利率；0=用 briefs rates_bonds，>0 覆盖
+    condor_iv_source: str = 'computed'    # 入场 IV 来源：computed(BS反推ATM活IV,默认) / briefs(旧volatility字段,对照)
     condor_open_combo_type: str = 'CUSTOM'  # 开仓单类型：CUSTOM(单笔4腿原子) / VERTICAL(两垂直,回退)
     # ---- 双向跨式(straddle)多腿模式 ----
     mode: str = 'single'              # single（单腿）/ straddle（call+put 双腿）/ condor（铁鹰卖方）

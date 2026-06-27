@@ -299,6 +299,98 @@ def enrich_greeks(chain_rows, spot, iv, t_years, r):
     return n
 
 
+# ---------- 自算「活 IV」入场信号（从 ATM 期权 mid 做 BS 反推）----------
+# 设计：docs/design/2026-06-27-condor-live-iv-signal.md
+# 起因：briefs.volatility 是按日/陈旧的标的平值（实测整夜冻结 16.65%，含盘中），不随盘动、
+# 还偏高，不适合 vol 择时；chain.implied_vol 又全 0。故从期权链已有 bid/ask 算 ATM mid，
+# 反推隐含波动率作入场闸/合成 delta 的 σ（逐 tick 更新，无额外行情订阅）。
+
+def bs_price(spot, strike, t_years, iv, r, put_call):
+    """Black-Scholes 期权理论价（欧式）。参数非法返回 None。"""
+    s, k, t, sig = _num(spot), _num(strike), _num(t_years), _num(iv)
+    rr = _num(r) or 0.0
+    if not (s and k and t and sig) or s <= 0 or k <= 0 or t <= 0 or sig <= 0:
+        return None
+    sq = sig * math.sqrt(t)
+    d1 = (math.log(s / k) + (rr + 0.5 * sig * sig) * t) / sq
+    d2 = d1 - sq
+    disc = math.exp(-rr * t)
+    if str(put_call).upper() == 'CALL':
+        return s * norm_cdf(d1) - k * disc * norm_cdf(d2)
+    return k * disc * norm_cdf(-d2) - s * norm_cdf(-d1)
+
+
+def implied_vol_from_price(price, spot, strike, t_years, r, put_call,
+                           lo=1e-3, hi=3.0, iters=60):
+    """二分反推隐含波动率：找 σ 使 bs_price(σ)=price。
+
+    稳健（无 vega 除零）。价低于内在价/高于无套利上界、或落在 [lo,hi] 价区间外 → 返回 None。
+    """
+    p, s, k, t = _num(price), _num(spot), _num(strike), _num(t_years)
+    rr = _num(r) or 0.0
+    if not (p and s and k and t) or p <= 0 or s <= 0 or k <= 0 or t <= 0:
+        return None
+    pc = str(put_call).upper()
+    disc = math.exp(-rr * t)
+    intrinsic = max(0.0, s - k * disc) if pc == 'CALL' else max(0.0, k * disc - s)
+    upper = s if pc == 'CALL' else k * disc        # call≤S, put≤K·e^(−rT)
+    if p <= intrinsic + 1e-9 or p >= upper:        # 坏价/超无套利区间
+        return None
+    fa = bs_price(s, k, t, lo, rr, pc)
+    fb = bs_price(s, k, t, hi, rr, pc)
+    if fa is None or fb is None:
+        return None
+    fa -= p
+    fb -= p
+    if fa * fb > 0:                                # price 不在 [lo,hi] 对应价区间内
+        return None
+    a, b = lo, hi
+    for _ in range(iters):
+        m = 0.5 * (a + b)
+        fm = bs_price(s, k, t, m, rr, pc) - p      # bs_price 关于 σ 单调增
+        if abs(fm) < 1e-8 or (b - a) < 1e-7:
+            return m
+        if (fa < 0) == (fm < 0):                   # 同号 → 根在 [m, b]
+            a, fa = m, fm
+        else:
+            b = m
+    return 0.5 * (a + b)
+
+
+def atm_iv_live(chain_rows, spot, t_years, r, n_strikes=3, max_rel_spread=0.5):
+    """近 ATM 多档 call/put 的 mid 各做 BS 反推，取中位数作活 ATM IV。无有效值→None。
+
+    鲁棒：只取最接近 spot 的 n_strikes 档（vega 大、反推稳）；剔除 mid 缺失/≤0、
+    点差/ mid 超 max_rel_spread（报价不可信）、反推失败或越界(≤1%或≥300%)的腿；
+    call 与 put 互为校验。skew 影响因只取近 ATM 而轻微（仍是平值单一 IV）。
+    """
+    s = _num(spot)
+    if s is None or s <= 0:
+        return None
+    strikes = sorted({_num(rw.get('strike')) for rw in chain_rows if _num(rw.get('strike'))},
+                     key=lambda kk: abs(kk - s))[:n_strikes]
+    kset = set(strikes)
+    ivs = []
+    for rw in chain_rows:
+        k = _num(rw.get('strike'))
+        if k is None or k not in kset:
+            continue
+        mid = _mid(rw)
+        if mid is None or mid <= 0:
+            continue
+        b, a = _bid(rw), _ask(rw)
+        if b is not None and a is not None and (a - b) / mid > max_rel_spread:
+            continue                               # 点差过宽，mid 不可信
+        iv = implied_vol_from_price(mid, s, k, t_years, r, rw.get('put_call'))
+        if iv is not None and 0.01 < iv < 3.0:
+            ivs.append(iv)
+    if not ivs:
+        return None
+    ivs.sort()
+    n = len(ivs)
+    return ivs[n // 2] if n % 2 else (ivs[n // 2 - 1] + ivs[n // 2]) / 2.0
+
+
 # ==================== ② IO 编排：CondorManager / CondorSupervisor ====================
 
 class CondorManager:
@@ -410,6 +502,21 @@ class CondorManager:
             return None, None
         return _parse_pct(q.get('volatility')), _num(q.get('rates_bonds'))
 
+    def _resolve_iv(self, chain, spot, t_years, r, briefs_iv):
+        """入场闸/合成 delta 用的 IV 来源（condor_iv_source）：
+
+        'computed'(默认)=从近 ATM 期权 mid BS 反推的活 IV，反推失败回退 briefs；
+        'briefs'=旧 volatility 字段（陈旧标的平值，仅作对照/兜底）。
+        """
+        if (self._cfg.condor_iv_source or 'computed').lower() == 'briefs':
+            return briefs_iv
+        live = atm_iv_live(chain, spot, t_years, r)
+        if live is not None:
+            logger.info('活 IV(BS反推 ATM)=%.4f（briefs volatility=%s，仅参考）', live, briefs_iv)
+            return live
+        logger.info('活 IV 反推失败，回退 briefs volatility=%s', briefs_iv)
+        return briefs_iv
+
     # ---------- 提案（自动） ----------
     def _try_propose(self):
         if not self._md.is_market_trading('US'):
@@ -427,14 +534,18 @@ class CondorManager:
         spot = None
         if self._cfg.condor_synthetic_greeks and greeks_missing(chain):
             spot = implied_spot(chain)
-            iv, rate = self._fetch_iv_rate(chain, spot)
+            briefs_iv, rate = self._fetch_iv_rate(chain, spot)   # r + 旧字段(回退用)
             dte_now = self._dte(self._expiry_date)
-            if spot is None or iv is None or not dte_now or dte_now <= 0:
-                logger.info('合成 greeks 失败：现价/IV/DTE 不可得(spot=%s iv=%s dte=%s)',
-                            spot, iv, dte_now)
+            if spot is None or not dte_now or dte_now <= 0:
+                logger.info('合成 greeks 失败：现价/DTE 不可得(spot=%s dte=%s)', spot, dte_now)
                 return
             r_used = self._cfg.condor_risk_free or rate or 0.0
-            filled = enrich_greeks(chain, spot, iv, dte_now / 365.0, r_used)
+            t_years = dte_now / 365.0
+            iv = self._resolve_iv(chain, spot, t_years, r_used, briefs_iv)   # 活 IV(默认) / briefs
+            if iv is None:
+                logger.info('合成 greeks 失败：IV 不可得(活算+briefs 均无)')
+                return
+            filled = enrich_greeks(chain, spot, iv, t_years, r_used)
             logger.info('合成 greeks：现价≈%.2f IV=%.4f r=%.4f DTE=%s 填充%d行',
                         spot, iv, r_used, dte_now, filled)
         else:

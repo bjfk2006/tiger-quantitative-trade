@@ -610,6 +610,7 @@ sudo docker compose logs --since 10m option-bot | grep -i "当日已实现亏损
 | `OBOT_CONDOR_PROPOSAL_TTL_MIN` | 10 | 开仓提案有效期（分钟），过期或现价漂移作废重评 |
 | `OBOT_CONDOR_SYNTHETIC_GREEKS` | true | 券商无逐档 delta 时按 BS 自算（平价反推现价+briefs平值IV/利率）；false=只用券商 greeks |
 | `OBOT_CONDOR_RISK_FREE` | 0 | 合成 delta 用无风险利率；0=用 briefs `rates_bonds`，>0 覆盖 |
+| `OBOT_CONDOR_IV_SOURCE` | computed | 入场闸/合成 delta 的 IV 来源：`computed`=从近 ATM 期权 mid BS 反推的活 IV（逐 tick，反推失败回退 briefs）；`briefs`=旧 `volatility` 字段（陈旧标的平值，对照/兜底）。设计 `docs/design/2026-06-27-condor-live-iv-signal.md` |
 | `OBOT_CONDOR_OPEN_COMBO_TYPE` | CUSTOM | 开仓单类型：`CUSTOM`=单笔 4 腿原子单（避免两垂直间半成交）；`VERTICAL`=两个垂直（回退） |
 
 > condor 模式**不使用** `OBOT_OPEN_ON_START`/`OBOT_DIRECTION/SYMBOL/...`——开仓只走"提案 + 人工 approve"。

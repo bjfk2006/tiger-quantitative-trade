@@ -66,6 +66,7 @@ def build_cfg():
         condor_account_equity=_f(g('OBOT_CONDOR_ACCOUNT_EQUITY'), 0.0),
         condor_synthetic_greeks=_b(g('OBOT_CONDOR_SYNTHETIC_GREEKS'), True),
         condor_risk_free=_f(g('OBOT_CONDOR_RISK_FREE'), 0.0),
+        condor_iv_source=(g('OBOT_CONDOR_IV_SOURCE') or 'computed').lower(),
         max_qty=_i(g('OBOT_MAX_QTY'), 1),
     )
 

@@ -3,10 +3,11 @@
 import unittest
 
 from option_bot.domain.models import CloseReason, PositionView
-from option_bot.strategy.condor import (atm_iv, bs_delta, build_condor,
-                                        condor_max_loss, enrich_greeks,
-                                        exit_decision, greeks_missing,
-                                        implied_spot, net_credit,
+from option_bot.strategy.condor import (atm_iv, atm_iv_live, bs_delta, bs_price,
+                                        build_condor, condor_max_loss,
+                                        enrich_greeks, exit_decision,
+                                        greeks_missing, implied_spot,
+                                        implied_vol_from_price, net_credit,
                                         nearest_strike_row, norm_cdf, _parse_pct,
                                         _reverse_legs, passes_entry_gate,
                                         select_by_delta, size_by_max_loss)
@@ -292,6 +293,77 @@ class TestSyntheticGreeks(unittest.TestCase):
         self.assertLess(rows[1]['delta'], 0)       # 缺失的 put 被填为负 delta
 
 
+def _bs_chain(spot, sigma, t, r, lo=80, hi=120, step=5, spread=0.05):
+    """按已知 σ 用 BS 给每个 strike 的 call/put 定价、delta 置 0（模拟无逐档 greeks 的链）。"""
+    rows = []
+    for k in range(lo, hi + 1, step):
+        for pc in ('CALL', 'PUT'):
+            px = bs_price(spot, k, t, sigma, r, pc)
+            rows.append({'identifier': f'{pc[0]}{k}', 'put_call': pc, 'strike': float(k),
+                         'delta': 0.0, 'implied_vol': 0.0,
+                         'bid_price': max(0.0, px - spread), 'ask_price': px + spread})
+    return rows
+
+
+class TestLiveIV(unittest.TestCase):
+    """自算活 IV：BS 正向定价 + 反推 + 近 ATM 鲁棒估计（设计 2026-06-27-condor-live-iv-signal）。"""
+
+    def test_bs_price_parity(self):
+        # put-call 平价：C − P = S − K·e^(−rT)
+        s, k, t, sig, r = 100.0, 100.0, 0.1, 0.2, 0.04
+        c = bs_price(s, k, t, sig, r, 'CALL')
+        p = bs_price(s, k, t, sig, r, 'PUT')
+        self.assertAlmostEqual(c - p, s - k * __import__('math').exp(-r * t), places=6)
+        self.assertGreater(c, 0)
+        self.assertGreater(p, 0)
+
+    def test_bs_price_bad_inputs(self):
+        self.assertIsNone(bs_price(0, 100, 0.1, 0.2, 0.0, 'CALL'))
+        self.assertIsNone(bs_price(100, 100, 0.0, 0.2, 0.0, 'CALL'))
+        self.assertIsNone(bs_price(100, 100, 0.1, 0.0, 0.0, 'CALL'))
+
+    def test_implied_vol_roundtrip(self):
+        # price=bs_price(σ) → 反推应还原 σ（call/put、多档 moneyness）
+        s, t, r = 100.0, 40 / 365.0, 0.04
+        for sig in (0.10, 0.18, 0.35, 0.80):
+            for k in (90, 100, 110):
+                for pc in ('CALL', 'PUT'):
+                    px = bs_price(s, k, t, sig, r, pc)
+                    got = implied_vol_from_price(px, s, k, t, r, pc)
+                    self.assertIsNotNone(got)
+                    self.assertAlmostEqual(got, sig, places=4)
+
+    def test_implied_vol_rejects_bad_price(self):
+        s, k, t, r = 100.0, 100.0, 0.1, 0.04
+        intrinsic = max(0.0, s - k * __import__('math').exp(-r * t))
+        self.assertIsNone(implied_vol_from_price(intrinsic - 0.01, s, k, t, r, 'CALL'))  # 低于内在
+        self.assertIsNone(implied_vol_from_price(s + 1, s, k, t, r, 'CALL'))             # 高于上界
+        self.assertIsNone(implied_vol_from_price(None, s, k, t, r, 'CALL'))
+
+    def test_atm_iv_live_recovers_sigma(self):
+        # 整条链按 σ=0.27 定价 → 近 ATM 反推中位数 ≈ 0.27
+        s, sig, t, r = 100.0, 0.27, 40 / 365.0, 0.04
+        chain = _bs_chain(s, sig, t, r)
+        got = atm_iv_live(chain, s, t, r)
+        self.assertIsNotNone(got)
+        self.assertAlmostEqual(got, sig, places=2)
+
+    def test_atm_iv_live_skips_bad_quotes(self):
+        # ATM 一档报价缺失/坏价被剔除，仍能从其余近 ATM 档恢复 σ
+        s, sig, t, r = 100.0, 0.22, 40 / 365.0, 0.04
+        chain = _bs_chain(s, sig, t, r)
+        for rw in chain:
+            if rw['strike'] == 100.0:           # 把 ATM 两腿打成无效报价
+                rw['bid_price'], rw['ask_price'] = None, None
+        got = atm_iv_live(chain, s, t, r)
+        self.assertIsNotNone(got)
+        self.assertAlmostEqual(got, sig, delta=0.02)
+
+    def test_atm_iv_live_none_when_no_valid(self):
+        self.assertIsNone(atm_iv_live([], 100.0, 0.1, 0.04))
+        self.assertIsNone(atm_iv_live([{'strike': 100.0, 'put_call': 'CALL'}], None, 0.1, 0.04))
+
+
 class TestReverseLegs(unittest.TestCase):
     def test_reverse_flips_each_side(self):
         legs = [{'identifier': 'P90', 'side': 'BUY', 'put_call': 'PUT', 'strike': 90},
@@ -340,6 +412,49 @@ class TestCondorManager(unittest.TestCase):
 
     def test_no_proposal_when_iv_low(self):
         mgr, _, _ = _make_mgr(self._tmp, atm_iv_val=0.10)
+        mgr.run_once()
+        self.assertEqual(mgr.state, BotState.IDLE)
+        self.assertIsNone(mgr.proposal)
+
+    def _synth_mgr(self, sigma, iv_source='computed', briefs_vol='16.65%'):
+        # 无逐档 greeks 的 BS 定价链（delta=0）→ 走合成路径，入场 IV 由 condor_iv_source 决定
+        s, t, r = 100.0, 40 / 365.0, 0.04
+        chain = _bs_chain(s, sigma, t, r)
+        md = MagicMock()
+        md.is_market_trading.return_value = True
+        md.list_expirations.return_value = [{'date': _date_offset(40)}]
+        md.get_chain.return_value = chain
+        md.get_underlying_price.side_effect = lambda *_a, **_k: 100.0
+        qmap = {rw['identifier']: {'bid_price': rw['bid_price'], 'ask_price': rw['ask_price'],
+                                   'volatility': briefs_vol, 'rates_bonds': 0.04} for rw in chain}
+        md.get_option_quote.side_effect = lambda ident, market='US': qmap.get(ident)
+        td = MagicMock()
+        td.account = 'paper-1'
+        td.new_dedup_tag.return_value = 'tag'
+        cfg = StrategyConfig(mode='condor', condor_underlying='SPY', condor_min_iv=0.20,
+                             condor_synthetic_greeks=True, condor_iv_source=iv_source,
+                             condor_risk_free=0.0, fill_timeout=0.05, fill_poll_interval=0.0)
+        return CondorManager(td, md, cfg, MagicMock(), self._tmp, sleep=lambda *_: None,
+                             now_ms=lambda: NOW)
+
+    def test_live_iv_proposes_when_computed_iv_high(self):
+        # 链按 σ=0.30 定价 > min_iv 0.20 → 自算活 IV 过闸 → 提案
+        mgr = self._synth_mgr(0.30)
+        mgr.run_once()
+        self.assertEqual(mgr.state, BotState.PROPOSED)
+        self.assertIsNotNone(mgr.proposal)
+        self.assertAlmostEqual(mgr.proposal['iv'], 0.30, delta=0.03)
+
+    def test_live_iv_blocks_when_computed_iv_low(self):
+        # 链按 σ=0.10 定价 < min_iv 0.20 → 活 IV 拦下，即便 briefs 显示 16.65%
+        mgr = self._synth_mgr(0.10, briefs_vol='16.65%')
+        mgr.run_once()
+        self.assertEqual(mgr.state, BotState.IDLE)
+        self.assertIsNone(mgr.proposal)
+
+    def test_iv_source_briefs_uses_stale_field(self):
+        # 链按 σ=0.30 定价（活 IV 会过闸），但 source=briefs 用陈旧 16.65%<0.20 → 不提案
+        mgr = self._synth_mgr(0.30, iv_source='briefs', briefs_vol='16.65%')
         mgr.run_once()
         self.assertEqual(mgr.state, BotState.IDLE)
         self.assertIsNone(mgr.proposal)
@@ -512,8 +627,9 @@ class TestCondorManager(unittest.TestCase):
                                   'volatility': '30%', 'rates_bonds': 0.04} for r in ch}
         md.get_option_quote.side_effect = lambda ident, market='US': qmap.get(ident)
         td = MagicMock(); td.account = 'paper-1'; td.new_dedup_tag.return_value = 'tag'
+        # 本例验证合成 delta 管线（非 IV 来源），固定走 briefs 源使 iv=30% 可断言
         cfg = StrategyConfig(mode='condor', condor_underlying='SPY', condor_min_iv=0.20,
-                             condor_synthetic_greeks=True)
+                             condor_synthetic_greeks=True, condor_iv_source='briefs')
         mgr = CondorManager(td, md, cfg, MagicMock(), self._tmp,
                             sleep=lambda *_: None, now_ms=lambda: NOW)
         mgr.run_once()
