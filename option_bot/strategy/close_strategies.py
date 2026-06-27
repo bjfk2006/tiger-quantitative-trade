@@ -56,11 +56,15 @@ class CloseStrategy(ABC):
 class BaseCloseStrategy(CloseStrategy):
     """安全底座：时间强平 + 硬止损永远优先生效。"""
 
-    def __init__(self, close_buffer_minutes, sl_percent, eod_close_max_dte=1):
+    def __init__(self, close_buffer_minutes, sl_percent, eod_close_max_dte=1,
+                 force_close_dte=None):
         self.close_buffer = close_buffer_minutes
         self.sl_percent = sl_percent
         # 收盘前强平只作用于 DTE≤该值的期权；更长期权持有过夜（由 build_strategy 按配置覆盖）
         self.eod_close_max_dte = eod_close_max_dte
+        # 多日 DTE 强平阈值（铁鹰用）：DTE≤该值即平，与盘中收盘前强平无关；
+        # None=关闭（straddle 不设→行为不变，仍走下面 minutes_to_close 的盘中 EOD）。
+        self.force_close_dte = force_close_dte
 
     def decide(self, ctx):
         # ① 收盘前强平：仅当 DTE 已临近(≤ eod_close_max_dte)才平；
@@ -69,12 +73,24 @@ class BaseCloseStrategy(CloseStrategy):
             if ctx.dte is None or ctx.dte <= self.eod_close_max_dte:
                 return CloseReason.TIME_FORCE_CLOSE
         if ctx.pnl_percent is None:
-            return None
+            # 盈亏不可得：仅多日 DTE 强平兜底（铁鹰；straddle force_close_dte=None 跳过）
+            return self._force_close_dte(ctx)
         # ② 硬止损兜底
         if ctx.pnl_percent <= -self.sl_percent:
             return CloseReason.STOP_LOSS
         # ③ 子类的盈利了结
-        return self.profit_decide(ctx)
+        prof = self.profit_decide(ctx)
+        if prof is not None:
+            return prof
+        # ④ 多日 DTE 强平（铁鹰用，**最低优先级**：盈利/止损先判，与旧 exit_decision 的
+        #    "止盈>止损>到期前"一致；straddle force_close_dte=None 跳过，行为不变）
+        return self._force_close_dte(ctx)
+
+    def _force_close_dte(self, ctx):
+        if (self.force_close_dte is not None and ctx.dte is not None
+                and ctx.dte <= self.force_close_dte):
+            return CloseReason.TIME_FORCE_CLOSE
+        return None
 
     def profit_decide(self, ctx) -> Optional[CloseReason]:
         return None
@@ -275,4 +291,26 @@ def build_strategy(name, cfg) -> CloseStrategy:
         raise ValueError(f'未知平仓策略: {name}（可选: {list(STRATEGY_REGISTRY)}）')
     # 收盘前强平的 DTE 阈值由配置统一注入（默认 1）
     strat.eod_close_max_dte = getattr(cfg, 'eod_close_max_dte', 1)
+    return strat
+
+
+def build_condor_close_strategy(cfg) -> CloseStrategy:
+    """铁鹰平仓策略（信用口径映射进通用策略类，复用 close_strategies，不新增策略）。
+
+    pnl_percent = (入场权利金−平仓成本)/入场权利金×100；故：
+      tp = condor_profit_target×100（默认 50）、sl = condor_stop_mult×100（默认 200）、
+      多日强平 force_close_dte = condor_dte_exit（默认 21）。
+    铁鹰不做盘中 EOD（喂 minutes_to_close=None），close_buffer 取 0 无副作用。
+    """
+    name = (getattr(cfg, 'condor_close_strategy', None) or 'threshold').lower()
+    tp = cfg.condor_profit_target * 100.0
+    sl = cfg.condor_stop_mult * 100.0
+    cb = 0
+    if name == 'threshold':
+        strat = ThresholdStrategy(cb, sl, tp)
+    elif name == 'trailing':
+        strat = TrailingStrategy(cb, sl, cfg.condor_trail_activation, cfg.condor_trail_giveback)
+    else:
+        raise ValueError(f'未知铁鹰平仓策略: {name}（可选: threshold, trailing）')
+    strat.force_close_dte = cfg.condor_dte_exit
     return strat

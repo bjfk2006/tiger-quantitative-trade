@@ -111,6 +111,11 @@ class StrategyConfig:
     condor_synthetic_greeks: bool = True  # 券商无逐档 delta 时按 BS 自算（平价反推现价+briefs平值IV）
     condor_risk_free: float = 0.0         # 合成 delta 用无风险利率；0=用 briefs rates_bonds，>0 覆盖
     condor_iv_source: str = 'computed'    # 入场 IV 来源：computed(BS反推ATM活IV,默认) / briefs(旧volatility字段,对照)
+    # 铁鹰平仓策略（可插拔，复用 close_strategies）。threshold=固定止盈(=今天行为)；trailing=移动止盈。
+    # 信用口径：止盈/止损由 condor_profit_target×100 / condor_stop_mult×100 映射；trailing 单位=占权利金%。
+    condor_close_strategy: str = 'threshold'  # threshold(默认,等价现状) / trailing
+    condor_trail_activation: float = 0.0      # trailing 武装阈值(占权利金%)；0=未配
+    condor_trail_giveback: float = 0.0        # trailing 从峰值回撤多少(占权利金%)即锁盈平仓
     condor_open_combo_type: str = 'CUSTOM'  # 开仓单类型：CUSTOM(单笔4腿原子) / VERTICAL(两垂直,回退)
     # ---- 双向跨式(straddle)多腿模式 ----
     mode: str = 'single'              # single（单腿）/ straddle（call+put 双腿）/ condor（铁鹰卖方）
@@ -202,6 +207,9 @@ class CondorSnapshot:
     opened_at: Optional[int]
     external_id: Optional[str]
     combo_order_ids: list = field(default_factory=list)
+    # 平仓策略与其运行态（带默认值，兼容旧快照；trailing 等有状态策略崩溃恢复用）
+    strategy_name: str = 'threshold'
+    strategy_state: dict = field(default_factory=dict)
 
     def to_dict(self) -> dict:
         return asdict(self)

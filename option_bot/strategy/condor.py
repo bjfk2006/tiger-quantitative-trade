@@ -21,6 +21,8 @@ from option_bot.adapters.errors import CloseRejected, DataUnavailable, OpenRejec
 from option_bot.domain.models import (BotState, CloseReason, CondorLeg,
                                       CondorSnapshot, OptionPick, PositionView)
 from option_bot.persistence.sink import NullSink
+from option_bot.strategy.close_strategies import (StrategyContext,
+                                                  build_condor_close_strategy)
 
 logger = logging.getLogger('option_bot.condor')
 
@@ -192,24 +194,15 @@ def size_by_max_loss(max_loss_per_share, multiplier, equity, max_loss_pct, fallb
     return fallback_qty
 
 
-def exit_decision(entry_credit, close_cost, dte, profit_target=0.5,
-                  stop_mult=2.0, dte_exit=21):
-    """铁鹰出场判定（自动执行）。close_cost=当前平仓需付的净债（可负）。
+def condor_pnl_percent(entry_credit, close_cost):
+    """铁鹰盈亏归一化为「占入场权利金的%」，喂给可插拔平仓策略的 pnl_percent。
 
-    优先级：止盈(吃满 profit_target×权利金) > 止损(亏达 stop_mult×权利金) > 到期前(≤dte_exit)。
+    pnl_percent = (入场权利金 − 当前平仓成本)/入场权利金 × 100。
+    任一缺失或入场权利金≤0 → None（与既有"不可得只判时间"语义一致）。
     """
-    if entry_credit is None or close_cost is None:
-        if dte is not None and dte <= dte_exit:
-            return CloseReason.TIME_FORCE_CLOSE
+    if entry_credit is None or close_cost is None or entry_credit <= 0:
         return None
-    pnl = entry_credit - close_cost
-    if entry_credit > 0 and pnl >= profit_target * entry_credit:
-        return CloseReason.TAKE_PROFIT
-    if entry_credit > 0 and pnl <= -stop_mult * entry_credit:
-        return CloseReason.STOP_LOSS
-    if dte is not None and dte <= dte_exit:
-        return CloseReason.TIME_FORCE_CLOSE
-    return None
+    return (entry_credit - close_cost) / entry_credit * 100.0
 
 
 # ---------- 合成希腊字母兜底（券商无逐档 delta 时按 Black-Scholes 自算）----------
@@ -411,6 +404,8 @@ class CondorManager:
         self._sleep = sleep
         self._now_ms = now_ms or (lambda: int(time.time() * 1000))
 
+        # 可插拔平仓策略（默认 threshold=固定止盈,等价旧 exit_decision；可换 trailing 移动止盈）
+        self._strategy = build_condor_close_strategy(self._cfg)
         self.state = BotState.IDLE
         self.symbol = self._cfg.condor_underlying
         self.expiry = None              # YYYYMMDD
@@ -805,9 +800,10 @@ class CondorManager:
             except Exception as e:  # noqa: BLE001
                 logger.warning('on_position 落库失败 %s: %s', leg.identifier, e)
         dte = self._dte(self._expiry_date) if self._expiry_date else None
-        reason = exit_decision(self.entry_credit, close_cost, dte,
-                               self._cfg.condor_profit_target, self._cfg.condor_stop_mult,
-                               self._cfg.condor_dte_exit)
+        ctx = StrategyContext(pnl_percent=condor_pnl_percent(self.entry_credit, close_cost),
+                              minutes_to_close=None, dte=dte,
+                              opened_at=self._opened_at, now_ts=self._now_ms())
+        reason = self._strategy.decide(ctx)   # 可插拔：threshold/trailing(信用口径)，DTE 强平在基类
         if reason is not None:
             pnl = (self.entry_credit - close_cost) if close_cost is not None else None
             logger.warning('铁鹰触发出场 reason=%s 平仓成本/股≈%s pnl/股≈%s dte=%s',
@@ -912,6 +908,9 @@ class CondorManager:
         self.entry_credit, self.max_loss = snap.entry_credit, snap.max_loss
         self._opened_at, self._tag = snap.opened_at, snap.external_id
         self.combo_order_ids = snap.combo_order_ids or []
+        # 还原平仓策略运行态（trailing 的 armed/peak 跨重启不丢）；策略类型以当前配置为准
+        self._strategy = build_condor_close_strategy(self._cfg)
+        self._strategy.load_state(getattr(snap, 'strategy_state', {}) or {})
         # 与券商持仓逐腿对账：不一致则进 ERROR 待人工核对，不自动出场（防基于错误状态乱平）
         ok, mismatches = self._reconcile_legs()
         if not ok:
@@ -949,7 +948,9 @@ class CondorManager:
             qty=self.qty, legs=[l.__dict__ for l in self.legs],
             entry_credit=self.entry_credit or 0.0, max_loss=self.max_loss or 0.0,
             state=self.state.value, opened_at=self._opened_at, external_id=self._tag,
-            combo_order_ids=self.combo_order_ids)
+            combo_order_ids=self.combo_order_ids,
+            strategy_name=getattr(self._strategy, 'name', 'threshold'),
+            strategy_state=self._strategy.state())
 
     def _persist(self):
         data = json.dumps(self._snapshot().to_dict(), ensure_ascii=False)

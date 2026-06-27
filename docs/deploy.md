@@ -602,9 +602,12 @@ sudo docker compose logs --since 10m option-bot | grep -i "当日已实现亏损
 | `OBOT_CONDOR_SHORT_DELTA` | 0.16 | 短腿目标 \|delta\|（~1σ 价外） |
 | `OBOT_CONDOR_WING_WIDTH` | 5 | 翼宽（行权价美元间距） |
 | `OBOT_CONDOR_MIN_IV` | 0.20 | **IV 入场闸**：ATM 隐含波动率下限，低于不开（验证时可调低如 0.05 以便出提案） |
-| `OBOT_CONDOR_PROFIT_TARGET` | 0.5 | 止盈：吃满 50% 权利金平 |
-| `OBOT_CONDOR_STOP_MULT` | 2.0 | 止损：亏达 2× 权利金平 |
-| `OBOT_CONDOR_DTE_EXIT` | 21 | 到期前 N 天平（避 gamma） |
+| `OBOT_CONDOR_PROFIT_TARGET` | 0.5 | 止盈：吃满 50% 权利金平（threshold 策略的 tp，=tp_percent/100） |
+| `OBOT_CONDOR_STOP_MULT` | 2.0 | 止损：亏达 2× 权利金平（硬止损 sl，所有策略强制生效，=sl_percent/100） |
+| `OBOT_CONDOR_DTE_EXIT` | 21 | 到期前 N 天平（避 gamma；force_close_dte，最低优先级，盈利/止损先判） |
+| `OBOT_CONDOR_CLOSE_STRATEGY` | threshold | 可插拔平仓策略：`threshold`=固定止盈(=默认/今天行为)；`trailing`=移动止盈/回撤保护。复用 `close_strategies`。设计 `docs/design/2026-06-27-condor-pluggable-close-strategy.md` |
+| `OBOT_CONDOR_TRAIL_ACTIVATION` | 0 | trailing 武装阈值（**占权利金%**，如 30=盈利达 30% 权利金才武装）；仅 `CLOSE_STRATEGY=trailing` 时用 |
+| `OBOT_CONDOR_TRAIL_GIVEBACK` | 0 | trailing 从峰值回撤多少（**占权利金%**，如 15）即锁盈平仓 |
 | `OBOT_CONDOR_MAX_LOSS_PCT` | 0.05 | 单仓最大亏损占账户比例（定张数） |
 | `OBOT_CONDOR_ACCOUNT_EQUITY` | 0 | 账户净值（>0 按风险定张数；0 回退 `OBOT_MAX_QTY`） |
 | `OBOT_CONDOR_PROPOSAL_TTL_MIN` | 10 | 开仓提案有效期（分钟），过期或现价漂移作废重评 |

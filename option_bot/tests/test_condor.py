@@ -2,10 +2,12 @@
 """铁鹰卖方策略纯决策核心单测。设计：2026-06-26-condor-premium-selling-engine.md。"""
 import unittest
 
-from option_bot.domain.models import CloseReason, PositionView
+from option_bot.domain.models import CloseReason, PositionView, StrategyConfig
+from option_bot.strategy.close_strategies import (StrategyContext,
+                                                  build_condor_close_strategy)
 from option_bot.strategy.condor import (atm_iv, atm_iv_live, bs_delta, bs_price,
                                         build_condor, condor_max_loss,
-                                        enrich_greeks, exit_decision,
+                                        condor_pnl_percent, enrich_greeks,
                                         greeks_missing, implied_spot,
                                         implied_vol_from_price, net_credit,
                                         nearest_strike_row, norm_cdf, _parse_pct,
@@ -142,26 +144,99 @@ class TestCreditAndRisk(unittest.TestCase):
         self.assertEqual(size_by_max_loss(3.8, 100, 0, 0.05, 2), 2)
 
 
+def _condor_decide(entry_credit, close_cost, dte, **cfgkw):
+    """构建铁鹰默认(threshold)平仓策略并判一次，等价旧 exit_decision 的薄封装。"""
+    cfg = StrategyConfig(mode='condor', condor_underlying='SPY', **cfgkw)
+    strat = build_condor_close_strategy(cfg)
+    ctx = StrategyContext(pnl_percent=condor_pnl_percent(entry_credit, close_cost),
+                          minutes_to_close=None, dte=dte)
+    return strat.decide(ctx)
+
+
 class TestExitDecision(unittest.TestCase):
+    """默认 threshold 策略须逐条等价于旧 exit_decision（用户已确认"符合预期"）。"""
+
     def test_take_profit_at_50pct(self):
         # 收1.0, 现在平仓只需付0.5 → pnl=0.5 = 50% → 止盈
-        self.assertEqual(exit_decision(1.0, 0.5, 30), CloseReason.TAKE_PROFIT)
+        self.assertEqual(_condor_decide(1.0, 0.5, 30), CloseReason.TAKE_PROFIT)
 
     def test_stop_loss_at_2x(self):
         # 收1.0, 平仓要付3.0 → pnl=-2.0 = -2× → 止损
-        self.assertEqual(exit_decision(1.0, 3.0, 30), CloseReason.STOP_LOSS)
+        self.assertEqual(_condor_decide(1.0, 3.0, 30), CloseReason.STOP_LOSS)
 
     def test_dte_exit(self):
-        self.assertEqual(exit_decision(1.0, 0.9, 21), CloseReason.TIME_FORCE_CLOSE)
+        self.assertEqual(_condor_decide(1.0, 0.9, 21), CloseReason.TIME_FORCE_CLOSE)
 
     def test_hold(self):
-        self.assertIsNone(exit_decision(1.0, 0.8, 30))
+        self.assertIsNone(_condor_decide(1.0, 0.8, 30))
 
     def test_dte_exit_even_when_value_missing(self):
-        self.assertEqual(exit_decision(None, None, 20), CloseReason.TIME_FORCE_CLOSE)
+        # close_cost 不可得 → 只剩 DTE 强平（pnl_percent=None，与旧语义一致）
+        self.assertEqual(_condor_decide(None, None, 20), CloseReason.TIME_FORCE_CLOSE)
 
     def test_profit_priority_over_dte(self):
-        self.assertEqual(exit_decision(1.0, 0.4, 21), CloseReason.TAKE_PROFIT)
+        self.assertEqual(_condor_decide(1.0, 0.4, 21), CloseReason.TAKE_PROFIT)
+
+    def test_hold_when_value_missing_and_dte_far(self):
+        self.assertIsNone(_condor_decide(None, None, 30))
+
+
+class TestCondorPluggableClose(unittest.TestCase):
+    """铁鹰可插拔平仓：归一化、trailing、状态往返、force_close_dte 不污染 straddle。"""
+
+    def test_pnl_percent_normalization(self):
+        self.assertAlmostEqual(condor_pnl_percent(1.0, 0.5), 50.0)
+        self.assertAlmostEqual(condor_pnl_percent(2.0, 5.0), -150.0)
+        self.assertIsNone(condor_pnl_percent(1.0, None))
+        self.assertIsNone(condor_pnl_percent(0.0, 0.5))      # 入场权利金≤0 → None(防除零)
+
+    def test_trailing_arms_and_locks_on_giveback(self):
+        # 武装 +30%、回撤 15%(占权利金)：峰值 +40% 回落到 +25% → TRAILING_STOP
+        cfg = StrategyConfig(mode='condor', condor_underlying='SPY',
+                             condor_close_strategy='trailing',
+                             condor_trail_activation=30.0, condor_trail_giveback=15.0)
+        strat = build_condor_close_strategy(cfg)
+        mk = lambda pct, dte=30: StrategyContext(pnl_percent=pct, minutes_to_close=None, dte=dte)
+        self.assertIsNone(strat.decide(mk(20)))    # 未到武装阈值
+        self.assertIsNone(strat.decide(mk(40)))    # 武装并记峰值 40
+        self.assertIsNone(strat.decide(mk(30)))    # 回撤 10 < 15，持有
+        self.assertEqual(strat.decide(mk(25)), CloseReason.TRAILING_STOP)  # 回撤 15 → 锁盈
+
+    def test_trailing_state_roundtrip(self):
+        cfg = StrategyConfig(mode='condor', condor_underlying='SPY',
+                             condor_close_strategy='trailing',
+                             condor_trail_activation=30.0, condor_trail_giveback=15.0)
+        s1 = build_condor_close_strategy(cfg)
+        mk = lambda pct: StrategyContext(pnl_percent=pct, minutes_to_close=None, dte=30)
+        s1.decide(mk(40))                          # 武装、峰值 40
+        snap = s1.state()
+        s2 = build_condor_close_strategy(cfg)      # 模拟重启
+        s2.load_state(snap)
+        self.assertEqual(s2.decide(mk(25)), CloseReason.TRAILING_STOP)  # 峰值已还原→直接触发
+
+    def test_trailing_hard_stop_still_applies(self):
+        # 即便用 trailing，硬止损(stop_mult×100=200%)仍在基类强制生效
+        cfg = StrategyConfig(mode='condor', condor_underlying='SPY',
+                             condor_close_strategy='trailing', condor_stop_mult=2.0,
+                             condor_trail_activation=30.0, condor_trail_giveback=15.0)
+        strat = build_condor_close_strategy(cfg)
+        ctx = StrategyContext(pnl_percent=-200.0, minutes_to_close=None, dte=30)
+        self.assertEqual(strat.decide(ctx), CloseReason.STOP_LOSS)
+
+    def test_force_close_dte_does_not_affect_straddle(self):
+        # straddle 路径(build_strategy)不设 force_close_dte → DTE 不触发强平(回归保护)
+        from option_bot.strategy.close_strategies import build_strategy
+        cfg = StrategyConfig(mode='straddle', tp_percent=30.0, sl_percent=50.0)
+        strat = build_strategy('threshold', cfg)
+        self.assertIsNone(strat.force_close_dte)
+        ctx = StrategyContext(pnl_percent=5.0, minutes_to_close=None, dte=0)
+        self.assertIsNone(strat.decide(ctx))   # dte=0 也不强平(straddle 靠 minutes_to_close)
+
+    def test_unknown_strategy_raises(self):
+        cfg = StrategyConfig(mode='condor', condor_underlying='SPY',
+                             condor_close_strategy='bogus')
+        with self.assertRaises(ValueError):
+            build_condor_close_strategy(cfg)
 
 
 import datetime as _dt

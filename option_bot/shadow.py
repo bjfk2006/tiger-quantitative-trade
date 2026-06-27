@@ -67,6 +67,9 @@ def build_cfg():
         condor_synthetic_greeks=_b(g('OBOT_CONDOR_SYNTHETIC_GREEKS'), True),
         condor_risk_free=_f(g('OBOT_CONDOR_RISK_FREE'), 0.0),
         condor_iv_source=(g('OBOT_CONDOR_IV_SOURCE') or 'computed').lower(),
+        condor_close_strategy=(g('OBOT_CONDOR_CLOSE_STRATEGY') or 'threshold').lower(),
+        condor_trail_activation=_f(g('OBOT_CONDOR_TRAIL_ACTIVATION'), 0.0),
+        condor_trail_giveback=_f(g('OBOT_CONDOR_TRAIL_GIVEBACK'), 0.0),
         max_qty=_i(g('OBOT_MAX_QTY'), 1),
     )
 
@@ -117,7 +120,9 @@ def _dte(expiry_date, tzname):
 def mark(cfg, md, entry):
     """给已锁定结构做一次盯市。返回 {close_cost,pnl,pnl_pct,dte,reason} 或 None（行情缺失）。"""
     from option_bot.adapters.errors import DataUnavailable
-    from option_bot.strategy.condor import exit_decision, net_credit
+    from option_bot.strategy.close_strategies import (StrategyContext,
+                                                      build_condor_close_strategy)
+    from option_bot.strategy.condor import condor_pnl_percent, net_credit
     legs = [{'identifier': l['identifier'], 'side': l['side']} for l in entry['legs']]
     try:
         qbi = {l['identifier']: md.get_option_quote(l['identifier'], market='US') for l in legs}
@@ -128,9 +133,13 @@ def mark(cfg, md, entry):
     dte = _dte(entry['expiry_date'], cfg.timezone)
     cred = entry['entry_credit']
     pnl = (cred - close_cost) if close_cost is not None else None
-    pnl_pct = (pnl / cred * 100.0) if (pnl is not None and cred) else None
-    reason = exit_decision(cred, close_cost, dte, cfg.condor_profit_target,
-                           cfg.condor_stop_mult, cfg.condor_dte_exit)
+    pnl_pct = condor_pnl_percent(cred, close_cost)
+    # 与引擎同一可插拔策略；trailing 的 armed/peak 存进 entry，样本间累积、随影子 JSON 持久化
+    strat = build_condor_close_strategy(cfg)
+    strat.load_state(entry.get('strategy_state') or {})
+    ctx = StrategyContext(pnl_percent=pnl_pct, minutes_to_close=None, dte=dte)
+    reason = strat.decide(ctx)
+    entry['strategy_state'] = strat.state()
     return {'close_cost': close_cost, 'pnl': pnl, 'pnl_pct': pnl_pct,
             'dte': dte, 'reason': reason.value if reason else None}
 
