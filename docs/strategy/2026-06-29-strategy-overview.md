@@ -102,6 +102,22 @@
 
 ---
 
+## 8. 换标的与对应的波动率代理（重要）
+
+- 当前标的 = **SPY**（标普500 ETF）；交易的是 **SPY 期权**。改 `OBOT_CONDOR_UNDERLYING` + 重启即可换标的（如 `QQQ`=纳斯达克100 ETF）。
+- **换标的时，IV-Rank 的 VIX 种子也要换成对应的波动率指数**，否则相对分位口径会偏：
+
+  | 标的 | 对应波动率指数（IV-Rank 种子用） | CBOE 历史 CSV |
+  |---|---|---|
+  | **SPY**（标普500） | **VIX** | `…/VIX_History.csv` |
+  | **QQQ**（纳斯达克100） | **VXN** | `…/VXN_History.csv` |
+  | IWM（罗素2000） | RVX | `…/RVX_History.csv` |
+
+- **活 IV 自算部分不受影响**——它直接从该标的的 ATM 期权 mid 用 BS 反推，与标的无关；只有 **VIX/VXN 种子**这一历史回填需对应。
+- 频率回测脚本 `python -m option_bot.backtest.iv_gate_freq --csv <对应指数>.csv` 对任意波动率指数通用（见 §5 与 `docs/backtest/`）。
+
+---
+
 ## 附：相关文档索引
 
 - 实现/运维：`docs/deploy.md`
