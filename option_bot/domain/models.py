@@ -116,6 +116,15 @@ class StrategyConfig:
     condor_close_strategy: str = 'threshold'  # threshold(默认,等价现状) / trailing
     condor_trail_activation: float = 0.0      # trailing 武装阈值(占权利金%)；0=未配
     condor_trail_giveback: float = 0.0        # trailing 从峰值回撤多少(占权利金%)即锁盈平仓
+    # IV-Rank 入场闸（设计 2026-06-29-condor-iv-rank-entry-gate）。默认 absolute=今天行为零变化。
+    condor_iv_gate_mode: str = 'absolute'     # absolute(IV≥min_iv) / rank(IVP≥阈值) / both(地板+IVP)
+    condor_min_iv_rank: float = 50.0          # IV 分位入场阈值(0–100)，rank/both 用
+    condor_iv_rank_floor: float = 0.0         # both 模式的绝对地板(IV小数)；0=无地板(both 退化为 rank)
+    condor_iv_rank_lookback_days: int = 252   # IV 历史滚动窗口(交易日)
+    condor_iv_rank_min_history: int = 60      # 暖机：历史不足此数则回退 absolute(用 min_iv)
+    condor_iv_rank_seed_from_vix: bool = False  # 用 VIX(close−gap)回填历史加速暖机(口径近似,默认关)
+    condor_iv_rank_vix_gap: float = 4.0       # 种子用 VIX 高于 ATM IV 的点数(偏斜溢价)
+    condor_iv_history_file: str = ''          # IV 历史文件路径；空=从 state 目录派生(引擎/影子须指同一文件)
     condor_open_combo_type: str = 'CUSTOM'  # 开仓单类型：CUSTOM(单笔4腿原子) / VERTICAL(两垂直,回退)
     # ---- 双向跨式(straddle)多腿模式 ----
     mode: str = 'single'              # single（单腿）/ straddle（call+put 双腿）/ condor（铁鹰卖方）

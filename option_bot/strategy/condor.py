@@ -23,6 +23,8 @@ from option_bot.domain.models import (BotState, CloseReason, CondorLeg,
 from option_bot.persistence.sink import NullSink
 from option_bot.strategy.close_strategies import (StrategyContext,
                                                   build_condor_close_strategy)
+from option_bot.strategy.iv_history import (IVHistoryStore, iv_percentile,
+                                            iv_rank)
 
 logger = logging.getLogger('option_bot.condor')
 
@@ -73,10 +75,15 @@ def _mid(q):
     return _num(q.get('latest_price'))
 
 
-def passes_entry_gate(iv_now, iv_min, rth, has_position):
+def passes_entry_gate(iv_now, iv_min, rth, has_position,
+                      mode='absolute', ivp=None, min_rank=50.0,
+                      rank_floor=0.0, history_ok=True):
     """开仓提案前的入场闸。返回 (ok: bool, reason: str)。
 
-    顺序：已有持仓 → 非 RTH → IV 不可得 → IV 低于闸 → 通过。
+    短路顺序：已有持仓 → 非 RTH → IV 不可得 → 按 mode 判 IV。
+    mode：absolute=IV≥iv_min(默认,今日行为) / rank=IVP≥min_rank /
+          both=IV≥rank_floor 且 IVP≥min_rank。
+    暖机未满(history_ok=False)时 rank/both **一律回退 absolute(用 iv_min)**——数据不足不乱开仓。
     """
     if has_position:
         return False, '已有持仓，单仓模式不再开新仓'
@@ -84,8 +91,17 @@ def passes_entry_gate(iv_now, iv_min, rth, has_position):
         return False, '非常规交易时段(RTH)，不开仓'
     if iv_now is None:
         return False, 'ATM 隐含波动率不可得'
-    if iv_now < iv_min:
-        return False, f'IV {iv_now:.1%} < 入场闸 {iv_min:.1%}（溢价不够，不卖）'
+    eff = mode if (mode == 'absolute' or history_ok) else 'absolute'
+    if eff == 'absolute':
+        if iv_now < iv_min:
+            return False, f'IV {iv_now:.1%} < 入场闸 {iv_min:.1%}（溢价不够，不卖）'
+        return True, 'ok'
+    if ivp is None:
+        return False, 'IV 分位不可得（历史不足/计算失败）'
+    if eff == 'both' and rank_floor > 0 and iv_now < rank_floor:
+        return False, f'IV {iv_now:.1%} < 绝对地板 {rank_floor:.1%}'
+    if ivp < min_rank:
+        return False, f'IV 分位 {ivp:.0f} < 入场分位 {min_rank:.0f}（相对不够贵）'
     return True, 'ok'
 
 
@@ -406,6 +422,22 @@ class CondorManager:
 
         # 可插拔平仓策略（默认 threshold=固定止盈,等价旧 exit_decision；可换 trailing 移动止盈）
         self._strategy = build_condor_close_strategy(self._cfg)
+        # IV-Rank 入场闸：活 IV 历史存储（引擎/影子共用同一文件）。默认 absolute 模式不影响判定。
+        iv_hist_path = (self._cfg.condor_iv_history_file
+                        or os.path.join(os.path.dirname(os.path.abspath(state_path)) or '.',
+                                        f'iv_history_{self._cfg.condor_underlying}.json'))
+        self._iv_store = IVHistoryStore(iv_hist_path, self._cfg.condor_iv_rank_lookback_days)
+        if self._cfg.condor_iv_rank_seed_from_vix:
+            vix_csv = os.path.join(os.path.dirname(os.path.abspath(iv_hist_path)) or '.',
+                                   'VIX_History.csv')
+            try:
+                n = self._iv_store.seed_from_vix(vix_csv, self._cfg.condor_iv_rank_vix_gap,
+                                                 self._today_date().isoformat())
+                if n:
+                    logger.info('IV-Rank 种子：从 VIX 回填 %d 日历史', n)
+            except Exception as e:  # noqa: BLE001 —— 种子失败不应中断启动
+                logger.warning('IV-Rank 种子失败: %s', e)
+        self._last_iv = self._last_ivp = self._last_ivr = None
         self.state = BotState.IDLE
         self.symbol = self._cfg.condor_underlying
         self.expiry = None              # YYYYMMDD
@@ -545,9 +577,22 @@ class CondorManager:
                         spot, iv, r_used, dte_now, filled)
         else:
             iv = atm_iv(chain)
-        ok, reason = passes_entry_gate(iv, self._cfg.condor_min_iv, True, False)
+        # 活 IV 历史采样 + IV 分位/Rank（IV-Rank 入场闸；absolute 模式下不影响判定）
+        if iv is not None:
+            self._iv_store.append_daily(self._today_date().isoformat(), iv)
+        hist = self._iv_store.values()
+        self._last_iv, self._last_ivp, self._last_ivr = (
+            iv, iv_percentile(hist, iv), iv_rank(hist, iv))
+        ok, reason = passes_entry_gate(
+            iv, self._cfg.condor_min_iv, True, False,
+            mode=self._cfg.condor_iv_gate_mode, ivp=self._last_ivp,
+            min_rank=self._cfg.condor_min_iv_rank, rank_floor=self._cfg.condor_iv_rank_floor,
+            history_ok=len(hist) >= self._cfg.condor_iv_rank_min_history)
         if not ok:
-            logger.info('铁鹰入场闸未过: %s', reason)
+            logger.info('铁鹰入场闸未过: %s (IV=%s IVP=%s IVR=%s 历史%d日)', reason,
+                        None if iv is None else round(iv, 4),
+                        None if self._last_ivp is None else round(self._last_ivp, 0),
+                        None if self._last_ivr is None else round(self._last_ivr, 0), len(hist))
             return
         calls = [r for r in chain if str(r.get('put_call', '')).upper() == 'CALL']
         puts = [r for r in chain if str(r.get('put_call', '')).upper() == 'PUT']
@@ -581,6 +626,8 @@ class CondorManager:
         self.proposal = {
             'legs': legs, 'credit': round(credit, 4), 'mid_credit': net_credit(legs, qbi, 'mid'),
             'max_loss': round(maxloss, 4), 'qty': qty, 'iv': round(iv, 4),
+            'ivp': None if self._last_ivp is None else round(self._last_ivp, 1),
+            'ivr': None if self._last_ivr is None else round(self._last_ivr, 1),
             'expiry': self.expiry, 'expiry_date': self._expiry_date,
             'dte': self._dte(self._expiry_date), 'spot': spot,
             'created_ms': self._now_ms(),
@@ -987,6 +1034,9 @@ class CondorManager:
             'mode': 'condor', 'state': self.state.value, 'symbol': self.symbol,
             'expiry': self.expiry, 'qty': self.qty, 'entry_credit': self.entry_credit,
             'max_loss': self.max_loss,
+            'iv': self._last_iv, 'ivp': self._last_ivp, 'ivr': self._last_ivr,
+            'gate_mode': self._cfg.condor_iv_gate_mode,
+            'iv_history_days': len(self._iv_store),
             'proposal': self.proposal,
             'legs': [{'id': l.identifier, 'side': l.side, 'pc': l.put_call,
                       'strike': l.strike, 'entry': l.entry_price} for l in self.legs],

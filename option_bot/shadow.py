@@ -70,6 +70,17 @@ def build_cfg():
         condor_close_strategy=(g('OBOT_CONDOR_CLOSE_STRATEGY') or 'threshold').lower(),
         condor_trail_activation=_f(g('OBOT_CONDOR_TRAIL_ACTIVATION'), 0.0),
         condor_trail_giveback=_f(g('OBOT_CONDOR_TRAIL_GIVEBACK'), 0.0),
+        condor_iv_gate_mode=(g('OBOT_CONDOR_IV_GATE_MODE') or 'absolute').lower(),
+        condor_min_iv_rank=_f(g('OBOT_CONDOR_MIN_IV_RANK'), 50.0),
+        condor_iv_rank_floor=_f(g('OBOT_CONDOR_IV_RANK_FLOOR'), 0.0),
+        condor_iv_rank_lookback_days=_i(g('OBOT_CONDOR_IV_RANK_LOOKBACK'), 252),
+        condor_iv_rank_min_history=_i(g('OBOT_CONDOR_IV_RANK_MIN_HISTORY'), 60),
+        condor_iv_rank_seed_from_vix=_b(g('OBOT_CONDOR_IV_RANK_SEED_FROM_VIX'), False),
+        condor_iv_rank_vix_gap=_f(g('OBOT_CONDOR_IV_RANK_VIX_GAP'), 4.0),
+        # 与引擎共用同一 IV 历史文件（引擎从 data 目录派生 iv_history_<symbol>.json）
+        condor_iv_history_file=(g('OBOT_CONDOR_IV_HISTORY_FILE')
+                                or os.path.join(os.path.dirname(SHADOW_FILE) or '.',
+                                                f"iv_history_{(g('OBOT_CONDOR_UNDERLYING') or 'SPY')}.json")),
         max_qty=_i(g('OBOT_MAX_QTY'), 1),
     )
 

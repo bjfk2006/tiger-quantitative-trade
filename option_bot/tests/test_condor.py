@@ -46,6 +46,47 @@ class TestEntryGate(unittest.TestCase):
         self.assertTrue(passes_entry_gate(0.35, 0.20, True, False)[0])
 
 
+class TestEntryGateModes(unittest.TestCase):
+    """IV-Rank 入场闸：rank/both 模式 + 暖机回退（设计 2026-06-29）。"""
+
+    def test_absolute_unchanged(self):
+        # 默认 absolute：等于旧行为，IVP 不参与
+        self.assertTrue(passes_entry_gate(0.25, 0.20, True, False, mode='absolute', ivp=0)[0])
+        self.assertFalse(passes_entry_gate(0.15, 0.20, True, False, mode='absolute', ivp=99)[0])
+
+    def test_rank_mode(self):
+        # 纯分位：IVP≥阈值即过，绝对 IV 低也行
+        self.assertTrue(passes_entry_gate(0.14, 0.20, True, False,
+                                          mode='rank', ivp=70, min_rank=50)[0])
+        self.assertFalse(passes_entry_gate(0.30, 0.20, True, False,
+                                           mode='rank', ivp=40, min_rank=50)[0])
+
+    def test_both_mode_needs_floor_and_rank(self):
+        # both：IV≥地板 且 IVP≥阈值
+        self.assertTrue(passes_entry_gate(0.14, 0.20, True, False, mode='both', ivp=70,
+                                          min_rank=50, rank_floor=0.12)[0])
+        # IVP 高但绝对 IV 低于地板 → 拦
+        self.assertFalse(passes_entry_gate(0.10, 0.20, True, False, mode='both', ivp=90,
+                                           min_rank=50, rank_floor=0.12)[0])
+        # 绝对够但 IVP 低 → 拦
+        self.assertFalse(passes_entry_gate(0.18, 0.20, True, False, mode='both', ivp=30,
+                                           min_rank=50, rank_floor=0.12)[0])
+
+    def test_warmup_falls_back_to_absolute(self):
+        # 历史不足(history_ok=False)：rank/both 一律回退 absolute(用 iv_min=0.20)
+        # 活 IV 0.14 在 absolute 下会被 0.20 拦（即便 IVP 高）——保证数据不足不乱开
+        ok, reason = passes_entry_gate(0.14, 0.20, True, False, mode='both', ivp=99,
+                                       min_rank=50, rank_floor=0.12, history_ok=False)
+        self.assertFalse(ok)
+        # 活 IV 0.25 在回退 absolute 下过闸
+        self.assertTrue(passes_entry_gate(0.25, 0.20, True, False, mode='rank', ivp=0,
+                                          min_rank=50, history_ok=False)[0])
+
+    def test_rank_mode_blocks_when_ivp_missing(self):
+        self.assertFalse(passes_entry_gate(0.30, 0.20, True, False,
+                                           mode='rank', ivp=None, history_ok=True)[0])
+
+
 class TestSelection(unittest.TestCase):
     def setUp(self):
         # 现价 ~100；puts delta 负、calls delta 正
@@ -283,7 +324,8 @@ def _make_mgr(tmp, atm_iv_val=0.30, quotes=None, sink=None):
     td.account = 'paper-1'
     td.new_dedup_tag.return_value = 'tag'
     cfg = StrategyConfig(mode='condor', condor_underlying='SPY', condor_min_iv=0.20,
-                         fill_timeout=0.05, fill_poll_interval=0.0)
+                         fill_timeout=0.05, fill_poll_interval=0.0,
+                         condor_iv_history_file=tmp + '.ivh.json')   # 隔离每测的 IV 历史
     mgr = CondorManager(td, md, cfg, MagicMock(), tmp, sleep=lambda *_: None,
                         now_ms=lambda: NOW, sink=sink)
     return mgr, md, td
@@ -474,8 +516,9 @@ class TestCondorManager(unittest.TestCase):
         self._tmp = tempfile.mktemp(suffix='_condor.json')
 
     def tearDown(self):
-        if os.path.exists(self._tmp):
-            os.remove(self._tmp)
+        for p in (self._tmp, self._tmp + '.ivh.json'):
+            if os.path.exists(p):
+                os.remove(p)
 
     def test_proposes_when_iv_high(self):
         mgr, _, _ = _make_mgr(self._tmp, atm_iv_val=0.30)
@@ -491,7 +534,7 @@ class TestCondorManager(unittest.TestCase):
         self.assertEqual(mgr.state, BotState.IDLE)
         self.assertIsNone(mgr.proposal)
 
-    def _synth_mgr(self, sigma, iv_source='computed', briefs_vol='16.65%'):
+    def _synth_mgr(self, sigma, iv_source='computed', briefs_vol='16.65%', **cfg_extra):
         # 无逐档 greeks 的 BS 定价链（delta=0）→ 走合成路径，入场 IV 由 condor_iv_source 决定
         s, t, r = 100.0, 40 / 365.0, 0.04
         chain = _bs_chain(s, sigma, t, r)
@@ -508,9 +551,39 @@ class TestCondorManager(unittest.TestCase):
         td.new_dedup_tag.return_value = 'tag'
         cfg = StrategyConfig(mode='condor', condor_underlying='SPY', condor_min_iv=0.20,
                              condor_synthetic_greeks=True, condor_iv_source=iv_source,
-                             condor_risk_free=0.0, fill_timeout=0.05, fill_poll_interval=0.0)
+                             condor_risk_free=0.0, fill_timeout=0.05, fill_poll_interval=0.0,
+                             condor_iv_history_file=self._tmp + '.ivh.json', **cfg_extra)
         return CondorManager(td, md, cfg, MagicMock(), self._tmp, sleep=lambda *_: None,
                              now_ms=lambda: NOW)
+
+    def test_iv_rank_both_mode_blocks_low_percentile(self):
+        # both 模式 + 暖机已满：活 IV(~0.30)高于地板，但预置历史使 IVP 低 → 不开
+        mgr = self._synth_mgr(0.30, condor_iv_gate_mode='both', condor_iv_rank_floor=0.12,
+                              condor_min_iv_rank=50.0, condor_iv_rank_min_history=3)
+        # 预置一段"更高 IV"历史 → 当前 0.30 分位低
+        for i, v in enumerate([0.40, 0.45, 0.50, 0.55]):
+            mgr._iv_store.append_daily(f'2026-05-0{i+1}', v)
+        mgr.run_once()
+        self.assertEqual(mgr.state, BotState.IDLE)
+        self.assertIsNone(mgr.proposal)
+
+    def test_iv_rank_both_mode_proposes_when_relatively_high(self):
+        # 预置一段"更低 IV"历史 → 当前 0.30 分位高 + 高于地板 → 提案
+        mgr = self._synth_mgr(0.30, condor_iv_gate_mode='both', condor_iv_rank_floor=0.12,
+                              condor_min_iv_rank=50.0, condor_iv_rank_min_history=3)
+        for i, v in enumerate([0.10, 0.12, 0.14, 0.16]):
+            mgr._iv_store.append_daily(f'2026-05-0{i+1}', v)
+        mgr.run_once()
+        self.assertEqual(mgr.state, BotState.PROPOSED)
+        self.assertIsNotNone(mgr.proposal['ivp'])
+        self.assertGreaterEqual(mgr.proposal['ivp'], 50.0)
+
+    def test_iv_rank_warmup_falls_back_to_absolute(self):
+        # rank 模式但历史不足(min_history 高) → 回退 absolute；活 IV~0.30≥0.20 → 提案
+        mgr = self._synth_mgr(0.30, condor_iv_gate_mode='rank', condor_min_iv_rank=99.0,
+                              condor_iv_rank_min_history=60)
+        mgr.run_once()
+        self.assertEqual(mgr.state, BotState.PROPOSED)   # 回退 absolute 放行（否则 IVP 不足会拦）
 
     def test_live_iv_proposes_when_computed_iv_high(self):
         # 链按 σ=0.30 定价 > min_iv 0.20 → 自算活 IV 过闸 → 提案

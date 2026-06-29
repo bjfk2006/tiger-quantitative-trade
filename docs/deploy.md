@@ -601,7 +601,15 @@ sudo docker compose logs --since 10m option-bot | grep -i "当日已实现亏损
 | `OBOT_CONDOR_TARGET_DTE` | 40 | 目标到期天数（30~45） |
 | `OBOT_CONDOR_SHORT_DELTA` | 0.16 | 短腿目标 \|delta\|（~1σ 价外） |
 | `OBOT_CONDOR_WING_WIDTH` | 5 | 翼宽（行权价美元间距） |
-| `OBOT_CONDOR_MIN_IV` | 0.20 | **IV 入场闸**：ATM 隐含波动率下限，低于不开（验证时可调低如 0.05 以便出提案） |
+| `OBOT_CONDOR_MIN_IV` | 0.20 | **绝对入场闸**：ATM IV 下限（`absolute` 模式 + IV-Rank 暖机回退用；验证时可调低如 0.05 以便出提案） |
+| `OBOT_CONDOR_IV_GATE_MODE` | absolute | 入场闸模式：`absolute`=IV≥min_iv(默认/今天行为) / `rank`=IVP≥阈值 / `both`=地板+IVP。设计 `docs/design/2026-06-29-condor-iv-rank-entry-gate.md` |
+| `OBOT_CONDOR_MIN_IV_RANK` | 50 | IV 分位入场阈值(0–100)，`rank`/`both` 用（"今天 IV 比过去一年多大比例的日子高"） |
+| `OBOT_CONDOR_IV_RANK_FLOOR` | 0 | `both` 的绝对地板(IV小数,如 0.12 防绝对过低)；0=无地板(both 退化为 rank) |
+| `OBOT_CONDOR_IV_RANK_LOOKBACK` | 252 | IV 历史滚动窗口(交易日,≈1年) |
+| `OBOT_CONDOR_IV_RANK_MIN_HISTORY` | 60 | 暖机：历史不足此数则**回退 absolute**(用 min_iv,安全)；自采约需 3 个月 |
+| `OBOT_CONDOR_IV_RANK_SEED_FROM_VIX` | false | 用 VIX(close−gap)回填历史加速暖机(口径近似,会被真样本老化顶替)；需 `<data>/VIX_History.csv` |
+| `OBOT_CONDOR_IV_RANK_VIX_GAP` | 4 | 种子用：VIX 高于 ATM IV 的点数(偏斜溢价) |
+| `OBOT_CONDOR_IV_HISTORY_FILE` | (空) | IV 历史文件；空=引擎从 data 目录派生 `iv_history_<symbol>.json`（影子已设为同一文件） |
 | `OBOT_CONDOR_PROFIT_TARGET` | 0.5 | 止盈：吃满 50% 权利金平（threshold 策略的 tp，=tp_percent/100） |
 | `OBOT_CONDOR_STOP_MULT` | 2.0 | 止损：亏达 2× 权利金平（硬止损 sl，所有策略强制生效，=sl_percent/100） |
 | `OBOT_CONDOR_DTE_EXIT` | 21 | 到期前 N 天平（避 gamma；force_close_dte，最低优先级，盈利/止损先判） |
