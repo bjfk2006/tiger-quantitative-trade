@@ -18,6 +18,7 @@ from option_bot.backtest.dolt_source import (DEFAULT_REPO, DEFAULT_STOCKS_REPO,
                                              DoltError, load_option_series,
                                              load_symbol_chain, load_underlying_closes)
 from option_bot.backtest.engine import run_backtest, run_batch, run_rolling_atm
+from option_bot.backtest.condor_engine import run_condor_backtest
 
 
 def _build_cfg(a) -> StrategyConfig:
@@ -88,6 +89,64 @@ def _run_rolling(a, cfg):
     return 0
 
 
+def _build_condor_cfg(a) -> StrategyConfig:
+    return StrategyConfig(
+        mode='condor', condor_underlying=a.symbol.upper(),
+        condor_target_dte=a.target_dte, condor_dte_exit=a.dte_exit,
+        condor_short_delta=a.short_delta, condor_wing_width=a.wing,
+        condor_min_iv=a.min_iv, condor_profit_target=a.profit_target,
+        condor_stop_mult=a.stop_mult, condor_max_loss_pct=a.max_loss_pct,
+        condor_account_equity=a.account_equity, max_qty=a.max_qty,
+        condor_close_strategy=a.close_strategy,
+        condor_trail_activation=a.trail_activation, condor_trail_giveback=a.trail_giveback,
+        condor_iv_gate_mode=a.gate_mode, condor_min_iv_rank=a.min_iv_rank,
+        condor_iv_rank_floor=a.rank_floor, condor_iv_rank_lookback_days=a.iv_rank_lookback,
+        condor_iv_rank_min_history=a.iv_rank_min_history, condor_risk_free=a.risk_free)
+
+
+def _run_condor(a):
+    horizon = (datetime.datetime.strptime(a.to_date, '%Y-%m-%d')
+               + datetime.timedelta(days=a.target_dte + 15)).strftime('%Y-%m-%d')
+    cfg = _build_condor_cfg(a)
+    try:
+        calls = load_symbol_chain(a.symbol, 'Call', a.from_date, horizon, repo=a.repo)
+        puts = load_symbol_chain(a.symbol, 'Put', a.from_date, horizon, repo=a.repo)
+    except DoltError as e:
+        print(f"错误: {e}", file=sys.stderr)
+        return 1
+    rows = ([{**r, 'put_call': 'CALL'} for r in calls]
+            + [{**r, 'put_call': 'PUT'} for r in puts])
+    if not rows:
+        print(f"无期权链：{a.symbol} {a.from_date}~{horizon}", file=sys.stderr)
+        return 2
+    out = run_condor_backtest(rows, cfg, entry_to=a.to_date, independent=a.independent)
+    s = out['summary']
+    if a.json:
+        print(json.dumps(out, ensure_ascii=False, indent=2))
+        return 0
+    print(f"\n铁鹰盈亏回测: {a.symbol.upper()} | 闸 {a.gate_mode} | 平仓 {a.close_strategy} | "
+          f"目标DTE {a.target_dte} 短腿Δ{a.short_delta} 翼{a.wing} | {a.from_date}~{a.to_date} | "
+          f"{'独立入场' if a.independent else '单仓顺序'}")
+    if s.get('count', 0) == 0:
+        print("  无有效入场（检查闸/数据覆盖与 DTE 设置）。")
+        return 0
+    print(f"  入场数 {s['count']} | 胜率 {s['win_rate']}% | 总盈亏 ${s['total_pnl_usd']} | "
+          f"均值 ${s['avg_pnl_usd']}（{s['avg_pnl_pct_credit']}%权利金）")
+    print(f"  最大盈 ${s['max_win_usd']} / 最大亏 ${s['max_loss_usd']} | 平均持有 {s['avg_days_held']}天 | "
+          f"最大回撤 ${s['max_drawdown_usd']} | profit_factor {s['profit_factor']}")
+    print(f"  出场原因: {s['reasons']}")
+    rows_sorted = sorted(out['trades'], key=lambda t: t['pnl_usd'])
+    def fmt(t):
+        return (f"    {t['entry_date']}→{t['exit_date']} ({t['days_held']}天,DTE0~{a.target_dte}) "
+                f"{' '.join(t['sides'])} | 信用{t['entry_credit']}→平{t['exit_cost']} | "
+                f"{t['reason']} | ${t['pnl_usd']}（{t['pnl_pct_credit']}%）IVP{t['ivp_entry']}")
+    print("  最差3笔:"); [print(fmt(t)) for t in rows_sorted[:3]]
+    print("  最好3笔:"); [print(fmt(t)) for t in rows_sorted[-3:][::-1]]
+    print("\n注：日线近似——出场按当日 mid 净价、比盘中触发晚一拍，跳空体现为次日跳变；"
+          "历史链无 greeks→合成选腿/自算IV(无skew)；月度到期、行权价偏稀，翼为近似。")
+    return 0
+
+
 def main(argv=None):
     p = argparse.ArgumentParser(prog='python3 -m option_bot.backtest',
                                 description='期权日线回测（复用实盘平仓策略；日线近似）')
@@ -110,6 +169,26 @@ def main(argv=None):
     p.add_argument('--step-days', type=int, default=1, help='滚动 ATM：入场节奏（默认每个交易日）')
     p.add_argument('--stocks-repo', default=DEFAULT_STOCKS_REPO,
                    help=f'滚动 ATM：stocks 仓库（默认 {DEFAULT_STOCKS_REPO}）')
+    # 铁鹰盈亏回测（见 docs/design/2026-06-29-condor-pnl-backtester.md）
+    p.add_argument('--condor', action='store_true',
+                   help='铁鹰盈亏回测：逐历史日重放开/持/平，输出真盈亏（不需 --expiration/--strike）')
+    p.add_argument('--short-delta', type=float, default=0.16, help='condor 短腿目标 |delta|')
+    p.add_argument('--wing', type=float, default=5.0, help='condor 翼宽($)')
+    p.add_argument('--dte-exit', type=int, default=21, help='condor 到期前 N 天强平')
+    p.add_argument('--min-iv', type=float, default=0.20, help='condor 绝对入场闸/暖机回退')
+    p.add_argument('--profit-target', type=float, default=0.5, help='condor 止盈(权利金占比)')
+    p.add_argument('--stop-mult', type=float, default=2.0, help='condor 止损(权利金倍数)')
+    p.add_argument('--max-loss-pct', type=float, default=0.05, help='condor 单仓最大亏损占账户比例')
+    p.add_argument('--account-equity', type=float, default=0.0, help='condor 账户净值(0→max_qty 定张)')
+    p.add_argument('--max-qty', type=int, default=1, help='张数上限(account-equity=0 时用)')
+    p.add_argument('--close-strategy', default='threshold', help='condor 平仓: threshold/trailing')
+    p.add_argument('--gate-mode', default='absolute', help='condor 入场闸: absolute/rank/both')
+    p.add_argument('--min-iv-rank', type=float, default=50.0, help='condor IVP 入场阈值')
+    p.add_argument('--rank-floor', type=float, default=0.0, help='condor both 模式绝对地板(IV小数)')
+    p.add_argument('--iv-rank-lookback', type=int, default=252, help='condor IV 分位回看(交易日)')
+    p.add_argument('--iv-rank-min-history', type=int, default=60, help='condor 暖机最小历史(不足回退 absolute)')
+    p.add_argument('--risk-free', type=float, default=0.04, help='condor BS 无风险利率')
+    p.add_argument('--independent', action='store_true', help='condor 每日独立入场(默认单仓顺序)')
     # 策略参数（与 .env/CLI 同义）
     p.add_argument('--strategy', default='trailing',
                    help='threshold/trailing/breakeven/time_in_trade/bracket')
@@ -125,6 +204,10 @@ def main(argv=None):
     p.add_argument('--json', action='store_true', help='输出 JSON')
     p.add_argument('--verbose', action='store_true', help='打印逐日盈亏轨迹')
     a = p.parse_args(argv)
+
+    # ---- 铁鹰盈亏回测（自建 condor cfg，不走 straddle 校验）----
+    if a.condor:
+        return _run_condor(a)
 
     cfg = _build_cfg(a)
     cfg.validate()
