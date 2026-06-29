@@ -18,7 +18,9 @@ from option_bot.backtest.dolt_source import (DEFAULT_REPO, DEFAULT_STOCKS_REPO,
                                              DoltError, load_option_series,
                                              load_symbol_chain, load_underlying_closes)
 from option_bot.backtest.engine import run_backtest, run_batch, run_rolling_atm
-from option_bot.backtest.condor_engine import run_condor_backtest
+from option_bot.backtest.condor_engine import (run_condor_backtest,
+                                               run_condor_bs_backtest)
+from option_bot.backtest.iv_gate_freq import load as load_vix
 
 
 def _build_cfg(a) -> StrategyConfig:
@@ -147,6 +149,59 @@ def _run_condor(a):
     return 0
 
 
+def _run_condor_bs(a):
+    cfg = _build_condor_cfg(a)
+    hor = (datetime.datetime.strptime(a.to_date, '%Y-%m-%d')
+           + datetime.timedelta(days=a.target_dte + 15)).strftime('%Y-%m-%d')
+    try:
+        closes = load_underlying_closes(a.symbol, a.from_date, hor, repo=a.stocks_repo)
+    except DoltError as e:
+        print(f"错误: {e}", file=sys.stderr)
+        return 1
+    if not closes:
+        print(f"无标的日线：{a.symbol} {a.from_date}~{hor}（检查 stocks 仓库）", file=sys.stderr)
+        return 2
+    try:
+        vix = load_vix(a.vix_csv)               # [(date, high, close)]
+    except FileNotFoundError:
+        print(f"找不到波动率指数 CSV：{a.vix_csv}（用 iv_gate_freq --download 或指定 --vix-csv）",
+              file=sys.stderr)
+        return 2
+    iv_series = {}
+    for dt, _hi, close in vix:
+        iv = (close - a.gap) / 100.0
+        if iv > 0:
+            iv_series[dt.strftime('%Y-%m-%d')] = iv
+    out = run_condor_bs_backtest(closes, iv_series, cfg, entry_to=a.to_date,
+                                 independent=a.independent, strike_spacing=a.strike_spacing,
+                                 slippage=a.slippage)
+    s = out['summary']
+    if a.json:
+        print(json.dumps(out, ensure_ascii=False, indent=2))
+        return 0
+    print(f"\n铁鹰 BS 重定价回测: {a.symbol.upper()} | 闸 {a.gate_mode} | 平仓 {a.close_strategy} | "
+          f"目标DTE {a.target_dte} 短腿Δ{a.short_delta} 翼{a.wing} | gap{a.gap} 滑点{a.slippage} | "
+          f"{a.from_date}~{a.to_date} | {'独立入场' if a.independent else '单仓顺序'}")
+    if s.get('count', 0) == 0:
+        print("  无有效入场（检查闸/数据/参数）。")
+        return 0
+    print(f"  入场数 {s['count']} | 胜率 {s['win_rate']}% | 总盈亏 ${s['total_pnl_usd']} | "
+          f"均值 ${s['avg_pnl_usd']}（{s['avg_pnl_pct_credit']}%权利金）")
+    print(f"  最大盈 ${s['max_win_usd']} / 最大亏 ${s['max_loss_usd']} | 平均持有 {s['avg_days_held']}天 | "
+          f"最大回撤 ${s['max_drawdown_usd']} | profit_factor {s['profit_factor']}")
+    print(f"  出场原因: {s['reasons']}")
+    rs = sorted(out['trades'], key=lambda t: t['pnl_usd'])
+    def fmt(t):
+        return (f"    {t['entry_date']}→{t['exit_date']} ({t['days_held']}天) 现价{t['spot_entry']} "
+                f"{' '.join(t['sides'])} | 信用{t['entry_credit']}→平{t['exit_cost']} | "
+                f"{t['reason']} | ${t['pnl_usd']}（{t['pnl_pct_credit']}%）IVP{t['ivp_entry']}")
+    print("  最差3笔:"); [print(fmt(t)) for t in rs[:3]]
+    print("  最好3笔:"); [print(fmt(t)) for t in rs[-3:][::-1]]
+    print("\n注：BS 模型价非市场成交；**平 IV 无 skew → 低估下行/尾部损失**（崩盘时 OTM put IV 涨更多）；"
+          "VIX→ATM IV 用 gap 近似；跳空体现为次日跳变。仅作相对比较，非精确实盘损益。")
+    return 0
+
+
 def main(argv=None):
     p = argparse.ArgumentParser(prog='python3 -m option_bot.backtest',
                                 description='期权日线回测（复用实盘平仓策略；日线近似）')
@@ -189,6 +244,13 @@ def main(argv=None):
     p.add_argument('--iv-rank-min-history', type=int, default=60, help='condor 暖机最小历史(不足回退 absolute)')
     p.add_argument('--risk-free', type=float, default=0.04, help='condor BS 无风险利率')
     p.add_argument('--independent', action='store_true', help='condor 每日独立入场(默认单仓顺序)')
+    # 铁鹰 BS 重定价回测（B 方案，见 docs/design/2026-06-29-condor-bs-repriced-backtester.md）
+    p.add_argument('--condor-bs', dest='condor_bs', action='store_true',
+                   help='铁鹰 BS 重定价回测：连续日close+波动率指数合成,不依赖期权链(SPY/VIX,QQQ/VXN)')
+    p.add_argument('--vix-csv', default='VIX_History.csv', help='波动率指数 CSV(SPY→VIX,QQQ→VXN)')
+    p.add_argument('--gap', type=float, default=4.0, help='VIX 高于 ATM IV 的点数(偏斜溢价)')
+    p.add_argument('--strike-spacing', type=float, default=1.0, help='合成行权价网格间距($)')
+    p.add_argument('--slippage', type=float, default=0.0, help='入场/平仓滑点(每股,近似成交摩擦)')
     # 策略参数（与 .env/CLI 同义）
     p.add_argument('--strategy', default='trailing',
                    help='threshold/trailing/breakeven/time_in_trade/bracket')
@@ -205,7 +267,9 @@ def main(argv=None):
     p.add_argument('--verbose', action='store_true', help='打印逐日盈亏轨迹')
     a = p.parse_args(argv)
 
-    # ---- 铁鹰盈亏回测（自建 condor cfg，不走 straddle 校验）----
+    # ---- 铁鹰回测（自建 condor cfg，不走 straddle 校验）----
+    if a.condor_bs:
+        return _run_condor_bs(a)
     if a.condor:
         return _run_condor(a)
 

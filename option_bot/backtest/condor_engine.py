@@ -9,14 +9,16 @@ iv_percentile），不重写任何策略判定。历史链只有 bid/ask（无 g
 run_condor_backtest 入参为已载入的数据（不碰 dolt），便于单测；CLI 在 __main__.py --condor。
 """
 import datetime as _dt
+import math
 
 from option_bot.domain.models import CloseReason
 from option_bot.strategy.close_strategies import (StrategyContext,
                                                   build_condor_close_strategy)
-from option_bot.strategy.condor import (atm_iv_live, build_condor,
+from option_bot.strategy.condor import (atm_iv_live, bs_price, build_condor,
                                         condor_max_loss, condor_pnl_percent,
                                         enrich_greeks, greeks_missing,
-                                        implied_spot, net_credit, size_by_max_loss)
+                                        implied_spot, net_credit,
+                                        passes_entry_gate, size_by_max_loss)
 from option_bot.strategy.iv_history import iv_percentile
 
 
@@ -104,7 +106,6 @@ def run_condor_backtest(chain_rows, cfg, *, multiplier=100, entry_to=None,
         hist = [iv_by_date[dates[j]] for j in range(max(0, i - lookback), i)
                 if iv_by_date[dates[j]] is not None]
         ivp = iv_percentile(hist, iv)
-        from option_bot.strategy.condor import passes_entry_gate
         ok, _reason = passes_entry_gate(
             iv, cfg.condor_min_iv, True, False, mode=cfg.condor_iv_gate_mode, ivp=ivp,
             min_rank=cfg.condor_min_iv_rank, rank_floor=cfg.condor_iv_rank_floor,
@@ -231,4 +232,149 @@ def _summarize(trades, multiplier):
         'max_drawdown_usd': round(max_dd, 2),
         'profit_factor': round(gross_win / abs(gross_loss), 2) if gross_loss < 0 else None,
         'reasons': reasons,
+    }
+
+
+# ==================== B 方案：BS 重定价回测（不依赖 option_chain）====================
+# 设计：docs/design/2026-06-29-condor-bs-repriced-backtester.md
+# 只用连续的「日收盘价 + 波动率指数(VIX/VXN)」合成整条铁鹰 P&L；模型价、平 IV 无 skew，
+# 会低估下行/尾部损失（详见设计 §6），仅作相对比较，非精确实盘损益。
+
+def _strike_grid(spot, spacing, span_pct=0.30):
+    """以 spot 为中心、按 spacing 铺 ±span_pct 的合成行权价网格。"""
+    lo, hi = spot * (1 - span_pct), spot * (1 + span_pct)
+    k = math.floor(lo / spacing) * spacing
+    out = []
+    while k <= hi:
+        if k > 0:
+            out.append(round(k, 4))
+        k += spacing
+    return out
+
+
+def _leg_price(spot, strike, t_years, iv, r, pc):
+    """BS 理论价；t≤0 或 BS 不可得 → 内在价。"""
+    if t_years > 0:
+        p = bs_price(spot, strike, t_years, iv, r, pc)
+        if p is not None:
+            return p
+    return max(0.0, spot - strike) if pc == 'CALL' else max(0.0, strike - spot)
+
+
+def _bs_qbi(legs, spot, t_years, iv, r):
+    """给四腿构造 BS 定价的 quote_by_id（bid=ask=理论价，故 mid=理论价）。"""
+    q = {}
+    for lg in legs:
+        px = _leg_price(spot, lg['strike'], t_years, iv, r, lg['put_call'])
+        q[lg['identifier']] = {'bid_price': px, 'ask_price': px}
+    return q
+
+
+def run_condor_bs_backtest(spot_series, iv_series, cfg, *, multiplier=100, entry_to=None,
+                           independent=False, strike_spacing=1.0, slippage=0.0, risk_free=0.04):
+    """BS 重定价铁鹰回测。spot_series/iv_series: {date(YYYY-MM-DD): float}（iv 为小数）。
+
+    单仓顺序（默认，镜像 live）；independent=True 每日独立入场。返回 {summary, trades}。
+    """
+    r = cfg.condor_risk_free or risk_free
+    dates = sorted(set(spot_series) & set(iv_series))
+    if not dates:
+        return {'summary': _summarize([], multiplier), 'trades': []}
+    target_dte, dte_exit = cfg.condor_target_dte, cfg.condor_dte_exit
+    lookback, min_hist = cfg.condor_iv_rank_lookback_days, cfg.condor_iv_rank_min_history
+    entry_to = entry_to or dates[-1]
+    n = len(dates)
+    trades = []
+    i = 0
+    while i < n:
+        d = dates[i]
+        if d > entry_to:
+            break
+        iv_t = iv_series[d]
+        hist = [iv_series[dates[j]] for j in range(max(0, i - lookback), i)]
+        ivp = iv_percentile(hist, iv_t)
+        ok, _reason = passes_entry_gate(
+            iv_t, cfg.condor_min_iv, True, False, mode=cfg.condor_iv_gate_mode, ivp=ivp,
+            min_rank=cfg.condor_min_iv_rank, rank_floor=cfg.condor_iv_rank_floor,
+            history_ok=len(hist) >= min_hist)
+        if not ok:
+            i += 1
+            continue
+        tr = _try_one_bs_trade(i, dates, spot_series, iv_series, cfg, r, ivp,
+                               multiplier, strike_spacing, slippage)
+        if tr is None:
+            i += 1
+            continue
+        trades.append(tr)
+        i = (i + 1) if independent else (tr['_exit_i'] + 1)
+    return {'summary': _summarize(trades, multiplier), 'trades': [_clean(t) for t in trades]}
+
+
+def _try_one_bs_trade(i, dates, spot_series, iv_series, cfg, r, ivp, multiplier,
+                      strike_spacing, slippage):
+    """在日 i 用 BS 合成建仓并逐日重定价持有到出场。返回 trade dict（含 _exit_i）或 None。"""
+    d = dates[i]
+    today = _d(d)
+    s0, iv0 = spot_series[d], iv_series[d]
+    expiry = today + _dt.timedelta(days=cfg.condor_target_dte)
+    t0 = cfg.condor_target_dte / 365.0
+    rows = [{'identifier': f'{pc}|{k:g}', 'put_call': pc, 'strike': k, 'delta': 0.0}
+            for k in _strike_grid(s0, strike_spacing) for pc in ('CALL', 'PUT')]
+    enrich_greeks(rows, s0, iv0, t0, r)
+    calls = [x for x in rows if x['put_call'] == 'CALL']
+    puts = [x for x in rows if x['put_call'] == 'PUT']
+    structure = build_condor(calls, puts, cfg.condor_short_delta, cfg.condor_wing_width)
+    if not structure:
+        return None
+    legs = structure['legs']
+    credit = net_credit(legs, _bs_qbi(legs, s0, t0, iv0, r), 'mid', closing=False) - slippage
+    if credit is None or credit <= 0:
+        return None
+    maxloss = condor_max_loss(structure['put_width'], structure['call_width'], credit)
+    qty = size_by_max_loss(maxloss, multiplier, cfg.condor_account_equity,
+                           cfg.condor_max_loss_pct, cfg.max_qty)
+    if qty < 1:
+        return None
+
+    strat = build_condor_close_strategy(cfg)
+    exit_i = exit_cost = reason = None
+    peak = 0.0
+    last_valid = None
+    n = len(dates)
+    j = i + 1
+    while j < n:
+        dte_j = (expiry - _d(dates[j])).days
+        if dte_j < 0:
+            break
+        cc = net_credit(legs, _bs_qbi(legs, spot_series[dates[j]], max(dte_j, 0) / 365.0,
+                                      iv_series[dates[j]], r), 'mid', closing=True) + slippage
+        last_valid = (j, cc)
+        pnl_pct = condor_pnl_percent(credit, cc)
+        if pnl_pct is not None and pnl_pct > peak:
+            peak = pnl_pct
+        rsn = strat.decide(StrategyContext(pnl_percent=pnl_pct, minutes_to_close=None, dte=dte_j))
+        if rsn is not None:
+            exit_i, exit_cost, reason = j, cc, rsn
+            break
+        j += 1
+    if exit_i is None:
+        if last_valid is None:
+            return None
+        exit_i, exit_cost, reason = last_valid[0], last_valid[1], CloseReason.TIME_FORCE_CLOSE
+
+    pnl_ps = credit - exit_cost
+    return {
+        '_exit_i': exit_i,
+        'entry_date': d, 'exit_date': dates[exit_i], 'expiration': expiry.isoformat(),
+        'strikes': [lg['strike'] for lg in legs],
+        'sides': [f"{lg['side']}{lg['put_call'][0]}{lg['strike']:g}" for lg in legs],
+        'entry_credit': round(credit, 4), 'exit_cost': round(exit_cost, 4),
+        'qty': qty, 'pnl_per_share': round(pnl_ps, 4),
+        'pnl_usd': round(pnl_ps * qty * multiplier, 2),
+        'pnl_pct_credit': round(condor_pnl_percent(credit, exit_cost), 1),
+        'pnl_pct_maxloss': round(pnl_ps / maxloss * 100, 1) if maxloss > 0 else None,
+        'max_loss': round(maxloss, 4), 'reason': reason.value if reason else None,
+        'days_held': (_d(dates[exit_i]) - today).days, 'peak_pct_credit': round(peak, 1),
+        'spot_entry': round(s0, 2), 'iv_entry': round(iv0, 4),
+        'ivp_entry': round(ivp, 1) if ivp is not None else None,
     }
