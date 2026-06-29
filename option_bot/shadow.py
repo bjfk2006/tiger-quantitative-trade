@@ -155,6 +155,16 @@ def mark(cfg, md, entry):
             'dte': dte, 'reason': reason.value if reason else None}
 
 
+def _gate_desc(cfg):
+    """入场闸的人类可读描述（随 condor_iv_gate_mode 变化，避免误导）。"""
+    mode = (cfg.condor_iv_gate_mode or 'absolute').lower()
+    if mode == 'rank':
+        return f'IVP≥{cfg.condor_min_iv_rank:.0f}'
+    if mode == 'both':
+        return f'IV≥{cfg.condor_iv_rank_floor:.0%} 且 IVP≥{cfg.condor_min_iv_rank:.0f}'
+    return f'IV≥{cfg.condor_min_iv:.0%}'
+
+
 def step(state, cfg, md):
     """推进一步影子状态机。返回 (new_state, message)。"""
     status = state.get('status', 'WAITING')
@@ -164,7 +174,7 @@ def step(state, cfg, md):
     if status == 'WAITING':
         prop = lock_or_none(cfg, md)
         if not prop:
-            return state, f'{_now_iso()} WAITING …（未满足 RTH+IV≥{cfg.condor_min_iv:.0%}）'
+            return state, f'{_now_iso()} WAITING …（未满足 RTH+{_gate_desc(cfg)}）'
         state['status'] = 'TRACKING'
         state['entry'] = {
             'ts': _now_iso(), 'symbol': cfg.condor_underlying,
