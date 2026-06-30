@@ -44,7 +44,7 @@ def progress(path=SHADOW_FILE):
     by_day = {}
     for t in st.get('trajectory') or []:
         cc = t.get('close_cost')
-        if cc is None or cc <= 0:
+        if cc is None or cc < 0:          # 丢负成本脏点；=0 合法(深度获利)
             continue
         day = (t.get('ts') or '')[:10]
         if day:

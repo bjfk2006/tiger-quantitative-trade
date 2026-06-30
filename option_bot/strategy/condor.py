@@ -863,6 +863,12 @@ class CondorManager:
             logger.warning('监控取腿行情失败: %s', e)
             return self._cfg.poll_interval
         close_cost = net_credit(legdicts, qbi, 'mid', closing=True)
+        # 防脏点（与影子同护栏，实盘平仓路径）：开盘前后缺/零/陈旧报价会让 net_credit 退化成
+        # ≤0 的假平仓成本（你卖出的信用价差在 DTE 还很大时不可能 0 成本买回）。喂给 trailing 会
+        # 被误武装在假峰值并触发误平 → 视为不可信，跳过本 tick（不决策/不落库），下个 tick 重试。
+        if close_cost is not None and close_cost < 0:   # 负成本不可能(垂直价差值∈[0,翼宽])→脏点；=0 为合法深度获利
+            logger.warning('监控得到不可信平仓成本(%.4f<0)，跳过本 tick', close_cost)
+            return self._cfg.poll_interval
         # 落库：逐腿写持仓走势（自算正确符号盈亏，复用已取的 qbi，无额外券商调用）。
         for leg in self.legs:
             mid = _mid(qbi.get(leg.identifier))

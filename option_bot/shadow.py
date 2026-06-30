@@ -144,8 +144,8 @@ def mark(cfg, md, entry):
     close_cost = net_credit(legs, qbi, 'mid', closing=True)
     # 防脏点：开盘前后偶发的缺/零/陈旧报价会让 net_credit 退化成 ≤0 的假平仓成本
     # （你卖出的信用价差在 DTE 还很大时不可能 0 成本买回）→ 视为不可信，跳过本 tick。
-    if close_cost is not None and close_cost <= 0:
-        logger.warning('影子盯市得到不可信平仓成本(%.4f)，跳过本 tick', close_cost)
+    if close_cost is not None and close_cost < 0:   # 负成本不可能→脏点；=0 为合法深度获利，放行
+        logger.warning('影子盯市得到不可信平仓成本(%.4f<0)，跳过本 tick', close_cost)
         return None
     dte = _dte(entry['expiry_date'], cfg.timezone)
     cred = entry['entry_credit']

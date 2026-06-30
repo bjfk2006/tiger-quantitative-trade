@@ -658,6 +658,29 @@ class TestCondorManager(unittest.TestCase):
         # （mid 会是 1.2；用保守=可成交）→ limit = -0.8
         self.assertAlmostEqual(args.args[6], -0.8, places=2)
 
+    def test_monitor_skips_dirty_close_cost(self):
+        # 实盘护栏：脏点(close_cost≤0)不喂策略——不误平、trailing 不被假峰值武装
+        from option_bot.strategy.close_strategies import build_condor_close_strategy
+        mgr, md, td = _make_mgr(self._tmp)
+        mgr._cfg.condor_close_strategy = 'trailing'
+        mgr._cfg.condor_trail_activation = 40.0
+        mgr._cfg.condor_trail_giveback = 15.0
+        mgr._strategy = build_condor_close_strategy(mgr._cfg)
+        td.place_combo.side_effect = [777]
+        td.get_order_status.return_value = {'status': 'FILLED', 'filled': 1,
+                                            'remaining': 0, 'avg_fill_price': 0}
+        mgr.run_once()
+        mgr.approve()
+        self.assertEqual(mgr.state, BotState.MONITORING)
+        # 注入退化报价：SELL 腿 mid 0.10 / BUY 腿 mid 0.20 → close_cost=(0.2)−(0.4)=−0.2 ≤0
+        sell_ids = {l.identifier for l in mgr.legs if l.side == 'SELL'}
+        deg = {l.identifier: ({'bid_price': 0.05, 'ask_price': 0.15} if l.identifier in sell_ids
+                              else {'bid_price': 0.15, 'ask_price': 0.25}) for l in mgr.legs}
+        md.get_option_quote.side_effect = lambda ident, market='US': deg.get(ident)
+        mgr._monitor_once()
+        self.assertEqual(mgr.state, BotState.MONITORING)   # 未误平
+        self.assertFalse(mgr._strategy.armed)              # trailing 未被假峰值武装
+
     def test_approve_vertical_fallback_two_combos(self):
         mgr, _, td = _make_mgr(self._tmp)
         mgr._cfg.condor_open_combo_type = 'VERTICAL'
