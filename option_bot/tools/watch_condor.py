@@ -62,11 +62,24 @@ def watch(path=SHADOW_FILE):
 
     # 最新浮盈亏（trajectory 尾）
     traj = st.get('trajectory') or []
-    pnl_txt = ''
+    cur_pnl = cur_dte = None
     if traj:
-        last = traj[-1]
-        pnl_txt = f" | 浮盈亏 {last.get('pnl_pct_of_credit')}% (DTE {last.get('dte')})"
+        cur_pnl = traj[-1].get('pnl_pct_of_credit')
+        cur_dte = traj[-1].get('dte')
+    pnl_txt = f" | 浮盈亏 {cur_pnl}% (DTE {cur_dte})" if cur_pnl is not None else ''
     armed = (e.get('strategy_state') or {}).get('armed')
+
+    # 点差缺口：开仓保守收(entry_credit) vs 中间价(mid_credit)；
+    # 开仓即时缺口 gap0=(ec−mc)/ec（≈负），现浮盈亏−gap0 = theta 已填平的点数。
+    ec, mc = e.get('entry_credit'), e.get('mid_credit')
+    spread_txt = None
+    if ec and mc:
+        gap0 = (ec - mc) / ec * 100.0
+        if cur_pnl is not None:
+            spread_txt = (f"  点差: 收 {ec:.2f}(保守) vs 中间价 {mc:.2f} | "
+                          f"开仓缺口 {gap0:+.1f}% → 现 {cur_pnl:+.1f}% (theta已填 {cur_pnl - gap0:+.1f}pt)")
+        else:
+            spread_txt = f"  点差: 收 {ec:.2f}(保守) vs 中间价 {mc:.2f} | 开仓缺口 {gap0:+.1f}%"
 
     # 预警：任一缓冲 <2% 视为接近击穿
     warns = []
@@ -86,6 +99,8 @@ def watch(path=SHADOW_FILE):
         f"  距 short call {sc:.0f}: {d_call:+.2f} ({buf_call:+.2f}%)  {'!!被击穿' if d_call < 0 else '安全'}",
         f"  更近一侧: {near} | 现价偏 {'call(上)' if spot > mid else 'put(下)'}侧",
     ]
+    if spread_txt:
+        lines.append(spread_txt)
     if warns:
         lines.append("  " + " | ".join(warns))
     return "\n".join(lines)
