@@ -4,35 +4,35 @@
 <meta charset="utf-8">
 <title>option_bot 看板</title>
 <style>
-  body { font-family: -apple-system, Segoe UI, Roboto, sans-serif; margin: 16px; background:#0f1115; color:#e6e6e6; }
-  h2 { margin: 18px 0 8px; font-size: 16px; }
-  table { border-collapse: collapse; width: 100%; font-size: 13px; }
-  th, td { border: 1px solid #2a2f3a; padding: 6px 8px; text-align: right; }
-  th { background:#1a1e27; text-align: right; }
+  body { font-family: -apple-system, Segoe UI, Roboto, sans-serif; margin: 16px; background:#faf6ec; color:#2a2a2a; font-size:16px; }
+  h2 { margin: 20px 0 9px; font-size: 20px; }
+  table { border-collapse: collapse; width: 100%; font-size: 15px; }
+  th, td { border: 1px solid #d8d0bf; padding: 7px 9px; text-align: right; }
+  th { background:#efe9da; text-align: right; }
   td.l, th.l { text-align: left; }
-  .pos { color:#4caf50; } .neg { color:#ef5350; }
+  .pos { color:#2e7d32; } .neg { color:#c62828; }
   .bar { display:flex; align-items:center; gap:10px; }
-  .dot { width:10px; height:10px; border-radius:50%; display:inline-block; }
-  .alive { background:#4caf50; } .dead { background:#ef5350; }
-  .muted { color:#8a909c; font-size:12px; }
-  .hist-form { margin:8px 0; display:flex; gap:12px; flex-wrap:wrap; align-items:center; font-size:13px; }
-  .hist-form input, .hist-form select { background:#1a1e27; color:#e6e6e6; border:1px solid #2a2f3a; padding:3px; }
-  button { background:#2a6; color:#fff; border:0; padding:5px 12px; border-radius:4px; cursor:pointer; }
+  .dot { width:11px; height:11px; border-radius:50%; display:inline-block; }
+  .alive { background:#2e7d32; } .dead { background:#c62828; }
+  .muted { color:#8a8270; font-size:13.5px; }
+  .hist-form { margin:8px 0; display:flex; gap:12px; flex-wrap:wrap; align-items:center; font-size:15px; }
+  .hist-form input, .hist-form select { background:#fffdf7; color:#2a2a2a; border:1px solid #d8d0bf; padding:4px; font-size:15px; }
+  button { background:#2e7d32; color:#fff; border:0; padding:6px 13px; border-radius:4px; cursor:pointer; font-size:15px; }
   .layout { display:flex; gap:16px; align-items:flex-start; }
-  .side { flex:0 0 150px; position:sticky; top:8px; display:flex; flex-direction:column; gap:4px; }
-  .side a { padding:7px 10px; border-radius:6px; cursor:pointer; color:#cdd3dd; font-size:14px; display:flex; align-items:center; gap:7px; }
-  .side a:hover { background:#1a1e27; }
-  .side a.on { background:#222836; color:#fff; font-weight:600; }
+  .side { flex:0 0 160px; position:sticky; top:8px; display:flex; flex-direction:column; gap:4px; }
+  .side a { padding:8px 11px; border-radius:6px; cursor:pointer; color:#4a4636; font-size:16px; display:flex; align-items:center; gap:7px; }
+  .side a:hover { background:#efe9da; }
+  .side a.on { background:#e3d9c2; color:#2a2a2a; font-weight:600; }
   .content { flex:1 1 auto; min-width:0; }
-  .sdot { width:8px; height:8px; border-radius:50%; background:#586270; }
-  .sdot.act { background:#4caf50; }
-  .card { background:#161a22; border:1px solid #2a2f3a; border-radius:8px; padding:14px 16px; max-width:680px; }
-  .card .row { margin:6px 0; font-size:14px; }
-  .card .big { font-size:15px; font-weight:600; }
-  .pbar { background:#20242e; height:14px; border-radius:7px; overflow:hidden; margin:7px 0; border:1px solid #2a2f3a; }
+  .sdot { width:9px; height:9px; border-radius:50%; background:#b8b0a0; }
+  .sdot.act { background:#2e7d32; }
+  .card { background:#fffdf7; border:1px solid #d8d0bf; border-radius:8px; padding:15px 17px; max-width:680px; }
+  .card .row { margin:7px 0; font-size:16px; }
+  .card .big { font-size:18px; font-weight:600; }
+  .pbar { background:#e8e1d0; height:15px; border-radius:7px; overflow:hidden; margin:8px 0; border:1px solid #d8d0bf; }
   .pbar > i { display:block; height:100%; background:linear-gradient(90deg,#ef5350,#ffb300,#4caf50); }
-  .warn { color:#ffb300; }
-  .kv { color:#8a909c; }
+  .warn { color:#b8860b; }
+  .kv { color:#8a8270; }
 </style>
 </head>
 <body>
@@ -80,7 +80,7 @@
     <button onclick="loadHistory();loadTicks()">查询</button>
   </div>
   <div id="histSummary" class="muted">选时间范围 → 刷新标识 → 查询</div>
-  <svg id="equity" width="100%" height="120" style="background:#1a1e27;border:1px solid #2a2f3a;margin:8px 0;display:block"></svg>
+  <svg id="equity" width="100%" height="120" style="background:#fffdf7;border:1px solid #d8d0bf;margin:8px 0;display:block"></svg>
   <table>
     <thead><tr>
       <th class="l">平仓时间</th><th class="l">标识</th><th class="l">方向</th><th>数量</th>
@@ -97,7 +97,7 @@
     </select>
     <span id="tickInfo" class="muted">上方选一个具体标识 → 查询</span>
   </div>
-  <svg id="tickChart" width="100%" height="160" style="background:#1a1e27;border:1px solid #2a2f3a;margin:8px 0;display:block"></svg>
+  <svg id="tickChart" width="100%" height="160" style="background:#fffdf7;border:1px solid #d8d0bf;margin:8px 0;display:block"></svg>
   </section>
 
   <section id="panel-condor" class="panel" style="display:none">
@@ -251,7 +251,7 @@ function drawEquity(curve){
   const sy=v=> H-pad - (ymax===ymin?0:(v-ymin)/(ymax-ymin))*(H-2*pad);
   const pts=curve.map(p=>sx(p.ts).toFixed(1)+','+sy(p.cum_pnl).toFixed(1)).join(' ');
   const zero=sy(0).toFixed(1), last=ys[ys.length-1];
-  svg.innerHTML='<line x1="0" y1="'+zero+'" x2="'+W+'" y2="'+zero+'" stroke="#3a3f4a"/>'+
+  svg.innerHTML='<line x1="0" y1="'+zero+'" x2="'+W+'" y2="'+zero+'" stroke="#c9c2b4"/>'+
     '<polyline points="'+pts+'" fill="none" stroke="'+(last>=0?'#4caf50':'#ef5350')+'" stroke-width="2"/>';
 }
 async function loadHistory(){
@@ -285,7 +285,7 @@ function drawTicks(rows, metric){
   const sy=v=> H-pad - (v-ymin)/(ymax-ymin)*(H-2*pad);
   const pts=rows.map(p=>sx(p.ts).toFixed(1)+','+sy(p[key]==null?ymin:p[key]).toFixed(1)).join(' ');
   let extra='';
-  if(metric!=='price'){ const z=sy(0).toFixed(1); extra='<line x1="0" y1="'+z+'" x2="'+W+'" y2="'+z+'" stroke="#3a3f4a"/>'; }
+  if(metric!=='price'){ const z=sy(0).toFixed(1); extra='<line x1="0" y1="'+z+'" x2="'+W+'" y2="'+z+'" stroke="#c9c2b4"/>'; }
   const last=ys[ys.length-1];
   const col = metric==='price' ? '#5b9bd5' : (last>=0?'#4caf50':'#ef5350');
   svg.innerHTML=extra+'<polyline points="'+pts+'" fill="none" stroke="'+col+'" stroke-width="1.5"/>';
