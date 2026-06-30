@@ -138,6 +138,11 @@ def build_strategy_status(engine_status, shadow_state):
     else:
         condor['source'] = 'none'   # 等待入场（iv/ivp 已在上面带出）
 
+    # 引擎 _last_iv 在重启后/proposal 待批期间可能暂为 None；用影子开仓 IV 兜底显示，
+    # 避免卡片长时间显示「IV —」。IVP 影子没有，保持引擎口径（采样后自然补上）。
+    if condor.get('iv') is None and sh.get('entry', {}).get('iv') is not None:
+        condor['iv'] = sh['entry']['iv']
+
     return {
         'active_mode': active,
         'bot_alive': bool(es.get('bot_alive', False)),

@@ -95,6 +95,19 @@ class TestBuildStrategyStatus(unittest.TestCase):
         self.assertIsNotNone(c['gap0_pct'])          # 影子派生
         self.assertFalse(out['strategies']['straddle']['active'])
 
+    def test_iv_fallback_to_shadow_when_engine_none(self):
+        # 引擎 iv=None（重启后未采样），影子 entry 带 iv → 兜底显示
+        eng = {'mode': 'condor', 'gate_mode': 'both', 'qty': 0}
+        sh = self._shadow(entry=dict(ENTRY, iv=0.1534))
+        c = build_strategy_status(eng, sh)['strategies']['condor']
+        self.assertEqual(c['iv'], 0.1534)
+
+    def test_engine_iv_preferred_over_shadow(self):
+        eng = {'mode': 'condor', 'iv': 0.1558, 'gate_mode': 'both', 'qty': 0}
+        sh = self._shadow(entry=dict(ENTRY, iv=0.1534))
+        c = build_strategy_status(eng, sh)['strategies']['condor']
+        self.assertEqual(c['iv'], 0.1558)            # 引擎优先
+
     def test_condor_waiting_no_shadow(self):
         eng = {'mode': 'condor', 'iv': 0.14, 'ivp': 30.0, 'gate_mode': 'both', 'qty': 0}
         out = build_strategy_status(eng, None)
