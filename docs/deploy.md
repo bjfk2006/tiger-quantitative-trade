@@ -157,7 +157,16 @@ sudo docker exec -it option-bot python -m option_bot.cli.main chain AAPL --expir
 sudo docker exec -it option-bot python -m option_bot.cli.main \
   run NVDA --direction LONG --expiry 2026-06-24 --strike 210 \
   --qty 1 --tp 30 --sl 50 --max-spread 20 --db-file /app/data/option_bot.db --yes
+
+# 铁鹰盯盘（只读）：在场 condor 的标的现价离两侧短腿的距离/缓冲%/浮盈亏
+# 现价走 implied_spot（平价反推）——paper 账户无美股 stock-brief 行情权限；
+# 缓冲<2%、被击穿或移动止盈 armed 时自带 ⚠/● 预警；无在场铁鹰输出"跳过"。
+sudo docker exec option-bot python -m option_bot.tools.watch_condor
 ```
+
+> 两跳 SSH 一键盯盘（跳板机无 sshpass，密码均在本地 ProxyCommand 处理）：
+> `… ssh -o ProxyCommand="sshpass -p <跳板密码> ssh -W %h:%p ubuntu@10.55.77.3" ubuntu@43.132.117.132 "sudo bash -c 'docker exec option-bot python -m option_bot.tools.watch_condor'"`。
+> 已配工作日 21:42（本地 UTC+8，= 美股开盘后约 10 分钟；冬令时改 22:42）自动巡检。
 
 操作面命令（apikey）。⚠️ **重要**：操作面绑定在**容器内** `127.0.0.1:8001`，从**宿主机**直接 `curl 127.0.0.1:8001` **不通**（这是安全隔离，外部/宿主机都不可达）。必须**在容器内**调用；slim 镜像无 `curl`，用 python urllib：
 
