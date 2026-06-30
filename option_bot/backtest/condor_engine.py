@@ -137,7 +137,7 @@ def _try_one_trade(d, i, dates, snap, qidx, cfg, r, iv, ivp, multiplier):
         enrich_greeks(exp_rows, spot, iv, dte0 / 365.0, r)
     calls = [x for x in exp_rows if x['put_call'] == 'CALL']
     puts = [x for x in exp_rows if x['put_call'] == 'PUT']
-    structure = build_condor(calls, puts, cfg.condor_short_delta, cfg.condor_wing_width)
+    structure = build_condor(calls, puts, cfg.condor_short_delta, cfg.condor_wing_width, getattr(cfg, "condor_side", "both"))
     if not structure:
         return None
     legs = structure['legs']
@@ -323,7 +323,7 @@ def _try_one_bs_trade(i, dates, spot_series, iv_series, cfg, r, ivp, multiplier,
     enrich_greeks(rows, s0, iv0, t0, r)
     calls = [x for x in rows if x['put_call'] == 'CALL']
     puts = [x for x in rows if x['put_call'] == 'PUT']
-    structure = build_condor(calls, puts, cfg.condor_short_delta, cfg.condor_wing_width)
+    structure = build_condor(calls, puts, cfg.condor_short_delta, cfg.condor_wing_width, getattr(cfg, "condor_side", "both"))
     if not structure:
         return None
     legs = structure['legs']

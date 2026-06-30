@@ -46,12 +46,17 @@ def compute_condor_view(entry, last_tick=None, spot=None):
     gap0_pct = ((ec - mc) / ec * 100.0) if ec and mc else None
     theta_filled_pt = (pnl_pct - gap0_pct) if (pnl_pct is not None and gap0_pct is not None) else None
 
+    # 结构侧：两短腿都有=both；只 call=bear call；只 put=bull put
+    side = ('both' if (sp is not None and sc is not None)
+            else 'call' if sc is not None
+            else 'put' if sp is not None else None)
+
     view = {
         'symbol': entry.get('symbol'),
         'expiry': entry.get('expiry_date') or entry.get('expiry'),
-        'dte': dte,
+        'dte': dte, 'side': side,
         'put_strike': sp, 'call_strike': sc,
-        'mid_strike': ((sp + sc) / 2.0) if (sp is not None and sc is not None) else None,
+        'mid_strike': ((sp + sc) / 2.0) if side == 'both' else None,
         'open_spot': entry.get('spot'),
         'entry_credit': ec, 'mid_credit': mc, 'close_cost': close_cost,
         'gap0_pct': gap0_pct, 'pnl_pct': pnl_pct, 'theta_filled_pt': theta_filled_pt,
@@ -61,21 +66,27 @@ def compute_condor_view(entry, last_tick=None, spot=None):
     }
 
     warns = []
-    if spot and sp is not None and sc is not None:
-        d_put, d_call = spot - sp, sc - spot          # >0 即在短腿安全侧
-        buf_put, buf_call = d_put / spot * 100.0, d_call / spot * 100.0
-        view.update({
-            'spot': spot, 'd_put': d_put, 'd_call': d_call,
-            'buf_put_pct': buf_put, 'buf_call_pct': buf_call,
-            'near': 'call' if d_call < d_put else 'put',
-            'spot_side': 'call' if spot > view['mid_strike'] else 'put',
-        })
-        if buf_put < 2.0:
-            warns.append(f"short put 缓冲仅 {buf_put:+.2f}%")
-        if buf_call < 2.0:
-            warns.append(f"short call 缓冲仅 {buf_call:+.2f}%")
-        if d_put < 0 or d_call < 0:
-            warns.append("已有短腿被击穿")
+    if spot:
+        view['spot'] = spot
+        if sp is not None:                            # 下方 short put（both/put 才有）
+            d_put = spot - sp                         # >0 即在安全侧
+            buf_put = d_put / spot * 100.0
+            view['d_put'], view['buf_put_pct'] = d_put, buf_put
+            if buf_put < 2.0:
+                warns.append(f"short put 缓冲仅 {buf_put:+.2f}%")
+            if d_put < 0:
+                warns.append("short put 已被击穿")
+        if sc is not None:                            # 上方 short call（both/call 才有）
+            d_call = sc - spot
+            buf_call = d_call / spot * 100.0
+            view['d_call'], view['buf_call_pct'] = d_call, buf_call
+            if buf_call < 2.0:
+                warns.append(f"short call 缓冲仅 {buf_call:+.2f}%")
+            if d_call < 0:
+                warns.append("short call 已被击穿")
+        if side == 'both':                            # 双边才有"更近一侧/偏哪边"
+            view['near'] = 'call' if view['d_call'] < view['d_put'] else 'put'
+            view['spot_side'] = 'call' if spot > view['mid_strike'] else 'put'
     if armed:
         warns.append("移动止盈已 armed")
     view['warns'] = warns

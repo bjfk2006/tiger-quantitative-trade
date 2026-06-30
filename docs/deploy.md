@@ -627,6 +627,7 @@ sudo docker compose logs --since 10m option-bot | grep -i "当日已实现亏损
 | `OBOT_CONDOR_TARGET_DTE` | 40 | 目标到期天数（30~45） |
 | `OBOT_CONDOR_SHORT_DELTA` | 0.16 | 短腿目标 \|delta\|（~1σ 价外） |
 | `OBOT_CONDOR_WING_WIDTH` | 5 | 翼宽（行权价美元间距） |
+| `OBOT_CONDOR_SIDE` | both | 结构：`both`(整只铁鹰)/`call`(bear call 只卖call价差,熊市/看跌中性,无下方击穿)/`put`(bull put 只卖put价差,看涨中性)。单边权利金更薄、reward/risk 同量级；非法值回退 both。设计 `docs/design/2026-06-30-condor-single-side-spread.md` |
 | `OBOT_CONDOR_MIN_IV` | 0.20 | **绝对入场闸**：ATM IV 下限（`absolute` 模式 + IV-Rank 暖机回退用；验证时可调低如 0.05 以便出提案） |
 | `OBOT_CONDOR_IV_GATE_MODE` | absolute | 入场闸模式：`absolute`=IV≥min_iv(默认/今天行为) / `rank`=IVP≥阈值 / `both`=地板+IVP。设计 `docs/design/2026-06-29-condor-iv-rank-entry-gate.md` |
 | `OBOT_CONDOR_MIN_IV_RANK` | 50 | IV 分位入场阈值(0–100)，`rank`/`both` 用（"今天 IV 比过去一年多大比例的日子高"） |

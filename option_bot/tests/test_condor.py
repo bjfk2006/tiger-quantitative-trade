@@ -128,6 +128,36 @@ class TestBuildCondor(unittest.TestCase):
     def test_returns_none_when_no_short(self):
         self.assertIsNone(build_condor([], [], 0.16, 5))
 
+    def test_side_call_only_bear_call(self):
+        c = build_condor(self.calls, self.puts, 0.16, 5, side='call')
+        legs = c['legs']
+        self.assertEqual([l['strike'] for l in legs], [105, 110])        # 卖105 / 买110
+        self.assertEqual([l['side'] for l in legs], ['SELL', 'BUY'])
+        self.assertEqual([l['put_call'] for l in legs], ['CALL', 'CALL'])
+        self.assertEqual(c['call_width'], 5)
+        self.assertEqual(c['put_width'], 0.0)                            # 单边另一侧 width=0
+        # condor_max_loss 单边 = call_width − credit
+        self.assertAlmostEqual(condor_max_loss(c['put_width'], c['call_width'], 1.5), 3.5)
+
+    def test_side_put_only_bull_put(self):
+        c = build_condor(self.calls, self.puts, 0.16, 5, side='put')
+        legs = c['legs']
+        self.assertEqual([l['strike'] for l in legs], [90, 95])          # 买90 / 卖95
+        self.assertEqual([l['side'] for l in legs], ['BUY', 'SELL'])
+        self.assertEqual([l['put_call'] for l in legs], ['PUT', 'PUT'])
+        self.assertEqual(c['put_width'], 5)
+        self.assertEqual(c['call_width'], 0.0)
+
+    def test_side_call_ignores_missing_puts(self):
+        # 单边 call 时，put 链为空也能成（只看 call 侧）
+        c = build_condor(self.calls, [], 0.16, 5, side='call')
+        self.assertIsNotNone(c)
+        self.assertEqual(len(c['legs']), 2)
+
+    def test_invalid_side_falls_back_both(self):
+        c = build_condor(self.calls, self.puts, 0.16, 5, side='xyz')
+        self.assertEqual(len(c['legs']), 4)                              # 非法值回退 both
+
     def test_nan_delta_skipped(self):
         nan = float('nan')
         # 闭市/冷门：delta 为 NaN 的行应被跳过，不参与选腿

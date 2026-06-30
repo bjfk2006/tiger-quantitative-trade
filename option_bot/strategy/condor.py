@@ -142,35 +142,61 @@ def nearest_strike_row(chain_rows, target_strike, put_call):
     return min(cands, key=lambda r: abs(_num(r['strike']) - target_strike))
 
 
-def build_condor(call_rows, put_rows, short_delta, wing_width):
-    """构建铁鹰四腿。返回 dict{legs, put_width, call_width} 或 None（结构非法）。
+def build_condor(call_rows, put_rows, short_delta, wing_width, side='both'):
+    """构建铁鹰四腿，或单边垂直信用价差。返回 dict{legs, put_width, call_width} 或 None。
 
-    legs：[{identifier, put_call, side(SELL/BUY), strike}]，顺序 put_long/put_short/call_short/call_long。
-    校验 put_long < put_short < call_short < call_long，否则返回 None。
+    side: 'both'(铁鹰,默认) | 'call'(bear call: 只卖 call 价差) | 'put'(bull put: 只卖 put 价差)。
+    legs：[{identifier, put_call, side(SELL/BUY), strike}]，顺序 put_long/put_short/call_short/call_long
+    （单边只含对应两腿）。校验行权价成序（both: kpl<kps<kcs<kcl；call: kcs<kcl；put: kpl<kps），否则 None。
+    单边时另一侧 width=0.0，使 condor_max_loss=max(width)−credit 自动取该价差宽度。
     """
-    put_short = select_by_delta(put_rows, short_delta, 'PUT')
-    call_short = select_by_delta(call_rows, short_delta, 'CALL')
-    if not put_short or not call_short:
-        return None
-    put_long = nearest_strike_row(put_rows, float(put_short['strike']) - wing_width, 'PUT')
-    call_long = nearest_strike_row(call_rows, float(call_short['strike']) + wing_width, 'CALL')
-    if not put_long or not call_long:
-        return None
-    kps, kpl = float(put_short['strike']), float(put_long['strike'])
-    kcs, kcl = float(call_short['strike']), float(call_long['strike'])
-    if not (kpl < kps < kcs < kcl):
+    side = (side or 'both').lower()
+    if side not in ('both', 'call', 'put'):
+        side = 'both'
+
+    def leg(row, act):
+        return {'identifier': str(row.get('identifier')).strip(),
+                'put_call': str(row.get('put_call')).upper(), 'side': act,
+                'strike': float(row.get('strike'))}
+
+    put_long = put_short = call_short = call_long = None
+    kps = kpl = kcs = kcl = None
+    put_width = call_width = 0.0
+
+    if side in ('both', 'put'):
+        put_short = select_by_delta(put_rows, short_delta, 'PUT')
+        if not put_short:
+            return None
+        put_long = nearest_strike_row(put_rows, float(put_short['strike']) - wing_width, 'PUT')
+        if not put_long:
+            return None
+        kps, kpl = float(put_short['strike']), float(put_long['strike'])
+        if not (kpl < kps):
+            return None
+        put_width = kps - kpl
+
+    if side in ('both', 'call'):
+        call_short = select_by_delta(call_rows, short_delta, 'CALL')
+        if not call_short:
+            return None
+        call_long = nearest_strike_row(call_rows, float(call_short['strike']) + wing_width, 'CALL')
+        if not call_long:
+            return None
+        kcs, kcl = float(call_short['strike']), float(call_long['strike'])
+        if not (kcs < kcl):
+            return None
+        call_width = kcl - kcs
+
+    if side == 'both' and not (kpl < kps < kcs < kcl):
         return None
 
-    def leg(row, side):
-        return {'identifier': str(row.get('identifier')).strip(),
-                'put_call': str(row.get('put_call')).upper(), 'side': side,
-                'strike': float(row.get('strike'))}
-    return {
-        'legs': [leg(put_long, 'BUY'), leg(put_short, 'SELL'),
-                 leg(call_short, 'SELL'), leg(call_long, 'BUY')],
-        'put_width': kps - kpl,
-        'call_width': kcl - kcs,
-    }
+    legs = []
+    if side in ('both', 'put'):
+        legs += [leg(put_long, 'BUY'), leg(put_short, 'SELL')]
+    if side in ('both', 'call'):
+        legs += [leg(call_short, 'SELL'), leg(call_long, 'BUY')]
+
+    return {'legs': legs, 'put_width': put_width, 'call_width': call_width}
 
 
 def net_credit(legs, quote_by_id, fill='mid', closing=False):
@@ -597,7 +623,8 @@ class CondorManager:
         calls = [r for r in chain if str(r.get('put_call', '')).upper() == 'CALL']
         puts = [r for r in chain if str(r.get('put_call', '')).upper() == 'PUT']
         structure = build_condor(calls, puts, self._cfg.condor_short_delta,
-                                 self._cfg.condor_wing_width)
+                                 self._cfg.condor_wing_width,
+                                 getattr(self._cfg, 'condor_side', 'both'))
         if not structure:
             logger.info('铁鹰结构构建失败（链不足/行权价不成序）')
             return

@@ -96,6 +96,7 @@ def _build_condor_cfg(a) -> StrategyConfig:
         mode='condor', condor_underlying=a.symbol.upper(),
         condor_target_dte=a.target_dte, condor_dte_exit=a.dte_exit,
         condor_short_delta=a.short_delta, condor_wing_width=a.wing,
+        condor_side=getattr(a, 'side', 'both'),
         condor_min_iv=a.min_iv, condor_profit_target=a.profit_target,
         condor_stop_mult=a.stop_mult, condor_max_loss_pct=a.max_loss_pct,
         condor_account_equity=a.account_equity, max_qty=a.max_qty,
@@ -229,6 +230,8 @@ def main(argv=None):
                    help='铁鹰盈亏回测：逐历史日重放开/持/平，输出真盈亏（不需 --expiration/--strike）')
     p.add_argument('--short-delta', type=float, default=0.16, help='condor 短腿目标 |delta|')
     p.add_argument('--wing', type=float, default=5.0, help='condor 翼宽($)')
+    p.add_argument('--side', choices=['both', 'call', 'put'], default='both',
+                   help='结构: both(铁鹰)/call(bear call 价差)/put(bull put 价差)')
     p.add_argument('--dte-exit', type=int, default=21, help='condor 到期前 N 天强平')
     p.add_argument('--min-iv', type=float, default=0.20, help='condor 绝对入场闸/暖机回退')
     p.add_argument('--profit-target', type=float, default=0.5, help='condor 止盈(权利金占比)')

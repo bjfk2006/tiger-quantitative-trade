@@ -58,6 +58,7 @@ def build_cfg():
         condor_target_dte=_i(g('OBOT_CONDOR_TARGET_DTE'), 40),
         condor_short_delta=_f(g('OBOT_CONDOR_SHORT_DELTA'), 0.16),
         condor_wing_width=_f(g('OBOT_CONDOR_WING_WIDTH'), 5.0),
+        condor_side=(g('OBOT_CONDOR_SIDE') or 'both').lower(),
         condor_min_iv=_f(g('OBOT_CONDOR_MIN_IV'), 0.20),
         condor_profit_target=_f(g('OBOT_CONDOR_PROFIT_TARGET'), 0.5),
         condor_stop_mult=_f(g('OBOT_CONDOR_STOP_MULT'), 2.0),

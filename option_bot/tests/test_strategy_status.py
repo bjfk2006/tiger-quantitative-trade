@@ -74,6 +74,34 @@ class TestComputeCondorView(unittest.TestCase):
         self.assertIsNone(v['pnl_pct'])
         self.assertEqual(v['dte'], 39)               # 回退 entry.dte0
 
+    def test_side_both(self):
+        v = compute_condor_view(ENTRY, TICK, spot=744.57)
+        self.assertEqual(v['side'], 'both')
+
+    def test_side_call_only(self):
+        # bear call：只有 SELL CALL（+BUY CALL 翼），无 short put
+        call_legs = [{'side': 'SELL', 'put_call': 'CALL', 'strike': 784.0},
+                     {'side': 'BUY', 'put_call': 'CALL', 'strike': 790.0}]
+        e = dict(ENTRY, legs=call_legs)
+        v = compute_condor_view(e, TICK, spot=744.57)
+        self.assertEqual(v['side'], 'call')
+        self.assertIsNone(v['put_strike'])
+        self.assertEqual(v['call_strike'], 784.0)
+        self.assertIsNotNone(v['d_call'])            # 上侧距离照算
+        self.assertIsNone(v['d_put'])                # 无下侧
+        self.assertIsNone(v['mid_strike'])           # 单边无中点
+        self.assertIsNone(v['near'])
+        self.assertIsNotNone(v['gap0_pct'])          # 点差/theta 与侧无关
+
+    def test_side_put_only_breach_warn(self):
+        put_legs = [{'side': 'BUY', 'put_call': 'PUT', 'strike': 704.0},
+                    {'side': 'SELL', 'put_call': 'PUT', 'strike': 709.0}]
+        e = dict(ENTRY, legs=put_legs)
+        v = compute_condor_view(e, TICK, spot=708.0)  # 跌破 short put 709
+        self.assertEqual(v['side'], 'put')
+        self.assertTrue(any('put 已被击穿' in w for w in v['warns']))
+        self.assertIsNone(v['d_call'])
+
 
 class TestBuildStrategyStatus(unittest.TestCase):
     def _shadow(self, **kw):

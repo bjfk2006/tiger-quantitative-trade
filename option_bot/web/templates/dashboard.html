@@ -185,9 +185,13 @@ function renderCondor(c){
   let prog=0;
   if(gap0!==null && gap0<0) prog = (pnl>=0)?100:Math.max(0,Math.min(100,(pnl-gap0)/(0-gap0)*100));
   else if(pnl>=0) prog=100;
-  let h='<div class="row big">铁鹰 '+(c.symbol||'')+' · '+(c.source==='engine'?'真实在场':'影子观察')+' · DTE '+numT(c.dte,0)+'</div>';
+  const sideTag={call:' bear call',put:' bull put'}[c.side]||'';
+  const rng = c.side==='call' ? ('short call '+numT(c.call_strike,0))
+            : c.side==='put'  ? ('short put '+numT(c.put_strike,0))
+            : ('区间 ['+numT(c.put_strike,0)+','+numT(c.call_strike,0)+']');
+  let h='<div class="row big">铁鹰 '+(c.symbol||'')+sideTag+' · '+(c.source==='engine'?'真实在场':'影子观察')+' · DTE '+numT(c.dte,0)+'</div>';
   if(c.iv!==undefined) h+='<div class="row">IV '+pctT(c.iv*100)+' | IVP '+numT(c.ivp,0)+' | 闸 '+(c.gate_mode||'—')+'</div>';
-  h+='<div class="row">信用 收 <b>'+numT(c.entry_credit)+'</b>(保守) / 中间价 '+numT(c.mid_credit)+' | 区间 ['+numT(c.put_strike,0)+','+numT(c.call_strike,0)+']</div>';
+  h+='<div class="row">信用 收 <b>'+numT(c.entry_credit)+'</b>(保守) / 中间价 '+numT(c.mid_credit)+' | '+rng+'</div>';
   h+='<div class="row">点差缺口 <b class="neg">'+pctT(gap0)+'</b> → 现 <b class="'+(pnl>=0?'pos':'neg')+'">'+pctT(pnl)+'</b>'+
      (c.theta_filled_pt!==null && c.theta_filled_pt!==undefined?' (theta已填 '+(c.theta_filled_pt>=0?'+':'')+c.theta_filled_pt.toFixed(1)+'pt)':'')+'</div>';
   h+='<div class="pbar"><i style="width:'+prog.toFixed(0)+'%"></i></div>';

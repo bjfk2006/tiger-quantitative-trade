@@ -37,20 +37,30 @@ def _fmt(v, pat='{:.2f}', dash='—'):
 
 
 def _render(view):
-    """把 compute_condor_view 的 dict 渲染成可读文本。"""
+    """把 compute_condor_view 的 dict 渲染成可读文本（兼容单边 bear call / bull put）。"""
     sp, sc, spot = view['put_strike'], view['call_strike'], view['spot']
-    head = (f"{view['symbol']} 现价≈{_fmt(spot)}(链反推) | 开仓 {_fmt(view['open_spot'])} | "
-            f"区间 [{_fmt(sp, '{:.0f}')},{_fmt(sc, '{:.0f}')}] 中点 {_fmt(view['mid_strike'], '{:.1f}')}")
+    side = view.get('side')
+    tag = {'call': ' [bear call]', 'put': ' [bull put]'}.get(side, '')
+    if side == 'both':
+        rng = f"区间 [{_fmt(sp, '{:.0f}')},{_fmt(sc, '{:.0f}')}] 中点 {_fmt(view['mid_strike'], '{:.1f}')}"
+    elif side == 'call':
+        rng = f"short call {_fmt(sc, '{:.0f}')}"
+    else:
+        rng = f"short put {_fmt(sp, '{:.0f}')}"
+    head = (f"{view['symbol']}{tag} 现价≈{_fmt(spot)}(链反推) | 开仓 {_fmt(view['open_spot'])} | {rng}")
     if view['pnl_pct'] is not None:
         head += f" | 浮盈亏 {view['pnl_pct']}% (DTE {view['dte']})"
     lines = [head]
     if spot is not None:
-        lines.append(f"  距 short put {sp:.0f}:  {view['d_put']:+.2f} ({view['buf_put_pct']:+.2f}%)  "
-                     f"{'!!被击穿' if view['d_put'] < 0 else '安全'}")
-        lines.append(f"  距 short call {sc:.0f}: {view['d_call']:+.2f} ({view['buf_call_pct']:+.2f}%)  "
-                     f"{'!!被击穿' if view['d_call'] < 0 else '安全'}")
-        lines.append(f"  更近一侧: {'CALL(上)' if view['near'] == 'call' else 'PUT(下)'} | "
-                     f"现价偏 {'call(上)' if view['spot_side'] == 'call' else 'put(下)'}侧")
+        if view['d_put'] is not None:
+            lines.append(f"  距 short put {sp:.0f}:  {view['d_put']:+.2f} ({view['buf_put_pct']:+.2f}%)  "
+                         f"{'!!被击穿' if view['d_put'] < 0 else '安全'}")
+        if view['d_call'] is not None:
+            lines.append(f"  距 short call {sc:.0f}: {view['d_call']:+.2f} ({view['buf_call_pct']:+.2f}%)  "
+                         f"{'!!被击穿' if view['d_call'] < 0 else '安全'}")
+        if side == 'both':
+            lines.append(f"  更近一侧: {'CALL(上)' if view['near'] == 'call' else 'PUT(下)'} | "
+                         f"现价偏 {'call(上)' if view['spot_side'] == 'call' else 'put(下)'}侧")
     if view['gap0_pct'] is not None:
         ec, mc = view['entry_credit'], view['mid_credit']
         spread = f"  点差: 收 {ec:.2f}(保守) vs 中间价 {mc:.2f} | 开仓缺口 {view['gap0_pct']:+.1f}%"
@@ -76,8 +86,8 @@ def watch(path=SHADOW_FILE):
         return "无法反推现价（期权链不可用），跳过本次。"
     traj = st.get('trajectory') or []
     view = compute_condor_view(e, traj[-1] if traj else None, spot)
-    if view['put_strike'] is None or view['call_strike'] is None:
-        return "影子 entry 缺少 short put/call 腿，无法盯盘。"
+    if view['put_strike'] is None and view['call_strike'] is None:
+        return "影子 entry 缺少短腿，无法盯盘。"
     return _render(view)
 
 
