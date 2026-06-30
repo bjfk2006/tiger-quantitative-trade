@@ -39,12 +39,16 @@ def progress(path=SHADOW_FILE):
     ec, mc = e.get('entry_credit'), e.get('mid_credit')
     gap0 = ((ec - mc) / ec * 100.0) if ec and mc else None
 
-    # trajectory 按 UTC 日期下采样：每天取最后一个 tick
+    # trajectory 按 UTC 日期下采样：每天取最后一个**可信** tick
+    # （跳过 close_cost≤0 的脏点——开盘前后缺/零报价导致的假成本）
     by_day = {}
     for t in st.get('trajectory') or []:
+        cc = t.get('close_cost')
+        if cc is None or cc <= 0:
+            continue
         day = (t.get('ts') or '')[:10]
         if day:
-            by_day[day] = t                       # 后写覆盖 → 当日最后一笔
+            by_day[day] = t                       # 后写覆盖 → 当日最后一笔可信值
 
     lines = [f"铁鹰 {e.get('symbol')} {e.get('expiry_date') or e.get('expiry')} | "
              f"信用 收{ec}/中{mc} | 开仓点差缺口 {gap0:+.1f}%" if gap0 is not None

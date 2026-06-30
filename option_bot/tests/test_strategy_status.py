@@ -136,6 +136,13 @@ class TestBuildStrategyStatus(unittest.TestCase):
         c = build_strategy_status(eng, sh)['strategies']['condor']
         self.assertEqual(c['iv'], 0.1558)            # 引擎优先
 
+    def test_skips_dirty_tick_close_cost_nonpositive(self):
+        # 末尾混入 close_cost<=0 的开盘脏点 → 应取前一个可信 tick，而非假 +100%
+        dirty = {'close_cost': -0.01, 'pnl_pct_of_credit': 100.9, 'dte': 38}
+        sh = self._shadow(trajectory=[TICK, dirty])
+        c = build_strategy_status({'mode': 'condor'}, sh)['strategies']['condor']
+        self.assertEqual(c['pnl_pct'], -7.3)         # 用了可信的 TICK，不是脏点
+
     def test_condor_waiting_no_shadow(self):
         eng = {'mode': 'condor', 'iv': 0.14, 'ivp': 30.0, 'gate_mode': 'both', 'qty': 0}
         out = build_strategy_status(eng, None)

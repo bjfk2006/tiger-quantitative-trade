@@ -139,8 +139,9 @@ def build_strategy_status(engine_status, shadow_state):
         condor['live'] = True
         condor['source'] = 'engine'
     elif sh_tracking:
-        traj = sh.get('trajectory') or []
-        condor.update(compute_condor_view(sh['entry'], traj[-1] if traj else None, None))
+        # 取最后一个**可信** tick（跳过 close_cost≤0 的开盘脏点），避免卡片显示假 pnl
+        valid = [t for t in (sh.get('trajectory') or []) if (t.get('close_cost') or 0) > 0]
+        condor.update(compute_condor_view(sh['entry'], valid[-1] if valid else None, None))
         condor['live'] = True
         condor['source'] = 'shadow'
     elif sh.get('outcome') is not None:
