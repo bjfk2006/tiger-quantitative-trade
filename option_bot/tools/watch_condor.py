@@ -11,11 +11,34 @@
 纯只读：只拉行情、读影子状态文件，不下单、不写状态。
 """
 import argparse
+import datetime
 import json
+import os
+
+import pytz
 
 from option_bot.shadow import SHADOW_FILE, build_md
-from option_bot.strategy.condor import implied_spot
+from option_bot.strategy.condor import (condor_pnl_percent, implied_spot,
+                                        net_credit)
+from option_bot.tools.condor_progress import _ivp_now
 from option_bot.web.strategy_status import compute_condor_view
+
+
+def _engine_state_path():
+    base = os.environ.get('OBOT_STATE_FILE', '/app/data/option_bot_state.json')
+    return base.rsplit('.json', 1)[0] + '_condor.json'
+
+
+def _dte_from_expiry(expiry):
+    if not expiry:
+        return None
+    s = str(expiry).replace('-', '')
+    try:
+        exp = datetime.date(int(s[:4]), int(s[4:6]), int(s[6:8]))
+    except (ValueError, IndexError):
+        return None
+    today = datetime.datetime.now(pytz.timezone('America/New_York')).date()
+    return (exp - today).days
 
 
 def _spot_via_chain(md, symbol, entry):
@@ -91,11 +114,51 @@ def watch(path=SHADOW_FILE):
     return _render(view)
 
 
+def watch_engine(path=None):
+    """盯**实盘/引擎**在场铁鹰：读引擎状态文件取腿，现取行情算 close_cost/pnl/距离（只读）。"""
+    path = path or _engine_state_path()
+    with open(path, 'r', encoding='utf-8') as f:
+        st = json.load(f)
+    if st.get('state') != 'MONITORING' or not st.get('legs') or not st.get('qty'):
+        return f"当前无在场实盘铁鹰（state={st.get('state')}, qty={st.get('qty')}），跳过。"
+    legs = st['legs']
+    md = build_md()
+    try:
+        qbi = {l['identifier']: md.get_option_quote(l['identifier'], market='US') for l in legs}
+    except Exception:
+        return "实盘取腿行情失败，跳过本次。"
+    close_cost = net_credit(legs, qbi, 'mid', closing=True)
+    if close_cost is None:
+        return "实盘腿行情不全，跳过本次。"
+    if close_cost < 0:                       # 与引擎同护栏：负成本=脏点
+        return f"实盘平仓成本异常({close_cost:.2f}<0，疑似脏报价)，跳过本次。"
+    spot = _spot_via_chain(md, st['symbol'], {'expiry': st.get('expiry')})
+    dte = _dte_from_expiry(st.get('expiry'))
+    entry = {'symbol': st['symbol'], 'expiry': st.get('expiry'), 'legs': legs,
+             'entry_credit': st.get('entry_credit'), 'mid_credit': None,
+             'spot': None, 'dte0': dte, 'strategy_state': st.get('strategy_state')}
+    last_tick = {'close_cost': close_cost,
+                 'pnl_pct_of_credit': condor_pnl_percent(st.get('entry_credit'), close_cost),
+                 'dte': dte}
+    view = compute_condor_view(entry, last_tick, spot)
+    out = "[实盘 " + str(st.get('account')) + "] " + _render(view)
+    iv = _ivp_now(path, st.get('symbol') or 'SPY')   # iv_history 与状态文件同目录
+    if iv:
+        out += (f"\n  当前 IV {iv['iv']*100:.2f}% | IVP {iv['ivp']:.1f}% | IVR {iv['ivr']:.1f}%"
+                f"（{iv['date']} {iv['src']}）")
+    return out
+
+
 def main():
     ap = argparse.ArgumentParser(description='在场铁鹰现价-短腿距离盯盘（只读）')
-    ap.add_argument('--file', default=SHADOW_FILE, help='影子状态文件路径')
+    ap.add_argument('--source', choices=['shadow', 'engine'], default='shadow',
+                    help='shadow=影子文件(默认) / engine=实盘引擎在场仓')
+    ap.add_argument('--file', default=None, help='状态文件路径（缺省按 source 自动定位）')
     args = ap.parse_args()
-    print(watch(args.file))
+    if args.source == 'engine':
+        print(watch_engine(args.file))
+    else:
+        print(watch(args.file or SHADOW_FILE))
 
 
 if __name__ == '__main__':
