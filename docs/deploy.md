@@ -611,7 +611,7 @@ sudo docker compose logs --since 10m option-bot | grep -i "当日已实现亏损
 ## 19. 铁鹰卖方策略（condor）：IV 择时 + 人工确认开仓 + 自动出场
 
 定义风险的**双垂直信用价差**（卖近月 ~16Δ 短腿、买外翼）。只在 **IV 够高**时产出开仓**提案**，
-**开仓必须人工 `approve`**；止盈(+50%)/止损(−2×)/到期前(≤21DTE)平仓**自动执行**。一次只持一仓。
+**开仓必须人工 `approve`**；止盈(+50%)/止损(−2×)/到期前(≤dte_exit，现网15)平仓**自动执行**。一次只持一仓。
 设计见 `docs/design/2026-06-26-condor-premium-selling-engine.md`，策略原理见 `docs/strategy/2026-06-26-iv-timed-defined-risk-premium-selling.md`。
 
 > ⚠️ **务必先 paper 跑通**：combo 净价/动作约定（`_OPEN_ACTION/_CLOSE_ACTION`）须在模拟盘实测确认成交方向与价格符号正确，再考虑实盘。策略 edge 是 in-sample 回测，非盈利保证。**默认用模拟账户（§16.5 `switch-account.sh paper`）。**
@@ -638,7 +638,7 @@ sudo docker compose logs --since 10m option-bot | grep -i "当日已实现亏损
 | `OBOT_CONDOR_IV_HISTORY_FILE` | (空) | IV 历史文件；空=引擎从 data 目录派生 `iv_history_<symbol>.json`（影子已设为同一文件） |
 | `OBOT_CONDOR_PROFIT_TARGET` | 0.5 | 止盈：吃满 50% 权利金平（threshold 策略的 tp，=tp_percent/100） |
 | `OBOT_CONDOR_STOP_MULT` | 2.0 | 止损：亏达 2× 权利金平（硬止损 sl，所有策略强制生效，=sl_percent/100） |
-| `OBOT_CONDOR_DTE_EXIT` | 21 | 到期前 N 天平（避 gamma；force_close_dte，最低优先级，盈利/止损先判） |
+| `OBOT_CONDOR_DTE_EXIT` | 21（**现网=15**）| 到期前 N 天平（避 gamma；force_close_dte，最低优先级，盈利/止损先判）。**代码默认 21，现网 2026-06-30 调为 15**——持仓时长回测显示 DTE15（持~25天）为甜点（均值/胜率/profit_factor 均优、回撤持平），见 `docs/backtest/2026-06-30-condor-holding-period.md` |
 | `OBOT_CONDOR_CLOSE_STRATEGY` | threshold | 可插拔平仓策略：`threshold`=固定止盈(=默认/今天行为)；`trailing`=移动止盈/回撤保护。复用 `close_strategies`。设计 `docs/design/2026-06-27-condor-pluggable-close-strategy.md` |
 | `OBOT_CONDOR_TRAIL_ACTIVATION` | 0 | trailing 武装阈值（**占权利金%**，如 30=盈利达 30% 权利金才武装）；仅 `CLOSE_STRATEGY=trailing` 时用 |
 | `OBOT_CONDOR_TRAIL_GIVEBACK` | 0 | trailing 从峰值回撤多少（**占权利金%**，如 15）即锁盈平仓 |
@@ -676,7 +676,7 @@ ops /ops/reject  POST      # 拒绝当前提案 → 回 IDLE（下轮重评）
 
 ### 19.4 自动出场与手动平仓
 
-- **自动**：每 tick 算当前平仓成本 → 止盈(+50%)/止损(−2×)/到期前(≤21DTE) 命中即**自动平仓** → CLOSED。日志 `铁鹰触发出场 reason=...`。平仓用**翻转每条腿 BUY/SELL 的反向 combo**（CUSTOM 单笔或 VERTICAL 两单，与开仓单类型一致），不依赖"组合 action 翻转"。
+- **自动**：每 tick 算当前平仓成本 → 止盈(+50%)/止损(−2×)/到期前(≤dte_exit，现网15) 命中即**自动平仓** → CLOSED。日志 `铁鹰触发出场 reason=...`。平仓用**翻转每条腿 BUY/SELL 的反向 combo**（CUSTOM 单笔或 VERTICAL 两单，与开仓单类型一致），不依赖"组合 action 翻转"。
 - **手动**：`ops /ops/close POST` 平掉当前持仓。`ops /ops/stop POST` 停盯盘线程（不平仓）。
 - **半成交回滚**：approve 时若开仓单未在 `fill_timeout` 内成交，**自动撤单**；若有腿已成交则**逐腿反向市价拉平**，回到 IDLE，绝不留孤儿仓（日志 `撤单/回滚`）。
 - **恢复对账**：重启 `resume()` 会逐腿与券商持仓核对方向，不一致则进 `ERROR` 态**待人工核对、不自动出场**（日志 `恢复对账失败...ERROR`）。
