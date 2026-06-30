@@ -4,7 +4,9 @@
 不持有也不调用券商 SDK——数据全来自 SQLite。
 """
 import datetime
+import json
 import logging
+import os
 
 import pytz
 from flask import Flask, Response, jsonify, render_template, request
@@ -13,6 +15,7 @@ from option_bot.persistence.stats import (downsample, equity_curve,
                                            filter_by_close_ts, pair_round_trips,
                                            summarize)
 from option_bot.web.auth import check_basic
+from option_bot.web.strategy_status import build_strategy_status
 
 logger = logging.getLogger('option_bot.web.dashboard')
 
@@ -118,9 +121,29 @@ def create_dashboard_app(repo, user, password, status_provider=None):
             logger.error('读取逐tick失败: %s', e)
             return jsonify({'error': str(e)}), 500
 
+    @app.route('/api/strategy_status')
+    def strategy_status():
+        """策略状态聚合（引擎 status() + 影子 JSON）。只读、不调 SDK、异常不 500。"""
+        try:
+            eng = status_provider() if status_provider else {}
+            return jsonify(build_strategy_status(eng, _load_shadow()))
+        except Exception as e:  # noqa: BLE001
+            logger.error('读取策略状态失败: %s', e)
+            return jsonify({'active_mode': None, 'strategies': {}})
+
     @app.route('/healthz')
     def healthz():
         st = status_provider() if status_provider else {}
         return jsonify({'status': 'ok', 'bot_alive': bool(st.get('bot_alive', False))})
 
     return app
+
+
+def _load_shadow():
+    """读影子 JSON（OBOT_SHADOW_FILE，默认 /app/data/shadow_condor.json）；缺失/损坏 → None。"""
+    path = os.environ.get('OBOT_SHADOW_FILE', '/app/data/shadow_condor.json')
+    try:
+        with open(path, 'r', encoding='utf-8') as f:
+            return json.load(f)
+    except (OSError, ValueError):
+        return None
