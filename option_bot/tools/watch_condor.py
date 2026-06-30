@@ -132,13 +132,16 @@ def watch_engine(path=None):
         return "实盘腿行情不全，跳过本次。"
     if close_cost < 0:                       # 与引擎同护栏：负成本=脏点
         return f"实盘平仓成本异常({close_cost:.2f}<0，疑似脏报价)，跳过本次。"
-    spot = _spot_via_chain(md, st['symbol'], {'expiry': st.get('expiry')})
-    dte = _dte_from_expiry(st.get('expiry'))
-    entry = {'symbol': st['symbol'], 'expiry': st.get('expiry'), 'legs': legs,
+    exp = str(st.get('expiry') or '')
+    exp_dash = f"{exp[:4]}-{exp[4:6]}-{exp[6:8]}" if len(exp) == 8 and '-' not in exp else exp
+    spot = _spot_via_chain(md, st['symbol'], {'expiry_date': exp_dash, 'expiry': exp})
+    dte = _dte_from_expiry(exp)
+    entry = {'symbol': st['symbol'], 'expiry_date': exp_dash, 'legs': legs,
              'entry_credit': st.get('entry_credit'), 'mid_credit': None,
              'spot': None, 'dte0': dte, 'strategy_state': st.get('strategy_state')}
+    pnl_pct = condor_pnl_percent(st.get('entry_credit'), close_cost)
     last_tick = {'close_cost': close_cost,
-                 'pnl_pct_of_credit': condor_pnl_percent(st.get('entry_credit'), close_cost),
+                 'pnl_pct_of_credit': None if pnl_pct is None else round(pnl_pct, 1),
                  'dte': dte}
     view = compute_condor_view(entry, last_tick, spot)
     out = "[实盘 " + str(st.get('account')) + "] " + _render(view)
