@@ -217,6 +217,7 @@ class CondorSnapshot:
     opened_at: Optional[int]
     external_id: Optional[str]
     combo_order_ids: list = field(default_factory=list)
+    mid_credit: float = 0.0    # 开仓中间价信用（点差缺口/看板；默认 0 兼容旧快照）
     # 平仓策略与其运行态（带默认值，兼容旧快照；trailing 等有状态策略崩溃恢复用）
     strategy_name: str = 'threshold'
     strategy_state: dict = field(default_factory=dict)

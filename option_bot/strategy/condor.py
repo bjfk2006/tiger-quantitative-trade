@@ -471,9 +471,12 @@ class CondorManager:
         self.qty = 0
         self.legs = []                  # [CondorLeg]
         self.entry_credit = None        # 每股
+        self.mid_credit = None          # 开仓时中间价信用（点差缺口/看板卡片用）
         self.max_loss = None            # 每股
         self.proposal = None            # 待批提案 dict
         self.combo_order_ids = []
+        self._last_close_cost = None    # 最近一次有效盯市平仓成本（看板/状态透出）
+        self._last_pnl_pct = None       # 最近一次浮盈亏%(of credit)
         self._opened_at = None
         self._tag = None
         # 提案评估限频：market_state 等接口限流(~10/min)，IDLE 时每 60s 评估一次即可
@@ -711,6 +714,7 @@ class CondorManager:
         self.combo_order_ids = order_ids
         self.qty = qty
         self.entry_credit = p['credit']
+        self.mid_credit = p.get('mid_credit')
         self.max_loss = p['max_loss']
         self.legs = [CondorLeg(identifier=l['identifier'], put_call=l['put_call'],
                                side=l['side'], strike=l['strike'], qty=qty,
@@ -869,6 +873,11 @@ class CondorManager:
         if close_cost is not None and close_cost < 0:   # 负成本不可能(垂直价差值∈[0,翼宽])→脏点；=0 为合法深度获利
             logger.warning('监控得到不可信平仓成本(%.4f<0)，跳过本 tick', close_cost)
             return self._cfg.poll_interval
+        # 记录最近一次有效盯市值（看板卡片/状态透出，不影响判定）
+        if close_cost is not None:
+            self._last_close_cost = close_cost
+            p = condor_pnl_percent(self.entry_credit, close_cost)
+            self._last_pnl_pct = None if p is None else round(p, 1)
         # 落库：逐腿写持仓走势（自算正确符号盈亏，复用已取的 qbi，无额外券商调用）。
         for leg in self.legs:
             mid = _mid(qbi.get(leg.identifier))
@@ -986,6 +995,7 @@ class CondorManager:
             if snap.expiry and len(snap.expiry) == 8 else None
         self.legs = [CondorLeg(**lg) for lg in snap.legs]
         self.entry_credit, self.max_loss = snap.entry_credit, snap.max_loss
+        self.mid_credit = getattr(snap, 'mid_credit', 0.0) or None
         self._opened_at, self._tag = snap.opened_at, snap.external_id
         self.combo_order_ids = snap.combo_order_ids or []
         # 还原平仓策略运行态（trailing 的 armed/peak 跨重启不丢）；策略类型以当前配置为准
@@ -1028,7 +1038,7 @@ class CondorManager:
             qty=self.qty, legs=[l.__dict__ for l in self.legs],
             entry_credit=self.entry_credit or 0.0, max_loss=self.max_loss or 0.0,
             state=self.state.value, opened_at=self._opened_at, external_id=self._tag,
-            combo_order_ids=self.combo_order_ids,
+            combo_order_ids=self.combo_order_ids, mid_credit=self.mid_credit or 0.0,
             strategy_name=getattr(self._strategy, 'name', 'threshold'),
             strategy_state=self._strategy.state())
 
@@ -1066,7 +1076,10 @@ class CondorManager:
         return {
             'mode': 'condor', 'state': self.state.value, 'symbol': self.symbol,
             'expiry': self.expiry, 'qty': self.qty, 'entry_credit': self.entry_credit,
-            'max_loss': self.max_loss,
+            'mid_credit': self.mid_credit, 'max_loss': self.max_loss,
+            'close_cost': self._last_close_cost, 'pnl_percent': self._last_pnl_pct,
+            'dte': self._dte(self._expiry_date) if self._expiry_date else None,
+            'strategy_state': self._strategy.state(),
             'iv': self._last_iv, 'ivp': self._last_ivp, 'ivr': self._last_ivr,
             'gate_mode': self._cfg.condor_iv_gate_mode,
             'iv_history_days': len(self._iv_store),
