@@ -102,6 +102,7 @@ class StrategyConfig:
     condor_short_delta: float = 0.16      # 短腿目标 |delta|（~1σ 价外）
     condor_wing_width: float = 5.0        # 翼宽（行权价美元间距）
     condor_side: str = 'both'             # 结构：both(铁鹰)/call(bear call)/put(bull put)
+    condor_commission_per_leg: float = 0.0  # 每腿每次执行佣金$（往返=腿数×2×张数），扣佣净盈亏用
     condor_min_iv: float = 0.20           # IV 入场闸：ATM 隐含波动率绝对下限
     condor_profit_target: float = 0.5     # 止盈：吃到 50% 权利金即平
     condor_stop_mult: float = 2.0         # 止损：亏到 2× 权利金即平

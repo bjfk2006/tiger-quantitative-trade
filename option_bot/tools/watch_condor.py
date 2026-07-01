@@ -90,6 +90,11 @@ def _render(view):
         if view['pnl_pct'] is not None:
             spread += f" → 现 {view['pnl_pct']:+.1f}% (theta已填 {view['theta_filled_pt']:+.1f}pt)"
         lines.append(spread)
+    if view.get('net_pnl_usd') is not None:
+        lines.append(f"  扣佣净盈亏 {view['net_pnl_usd']:+.2f}$ "
+                     f"(毛 {view['gross_pnl_usd']:+.2f} − 往返佣金 {view['commission_rt']:.2f}"
+                     + (f"，净 {view['net_pnl_pct']:+.1f}%" if view.get('net_pnl_pct') is not None else "")
+                     + f") | 佣金拖累 {view['commission_drag_pct']:.1f}%")
     if view['warns']:
         lines.append("  " + " | ".join(view['warns']))
     return "\n".join(lines)
@@ -138,7 +143,9 @@ def watch_engine(path=None):
     dte = _dte_from_expiry(exp)
     entry = {'symbol': st['symbol'], 'expiry_date': exp_dash, 'legs': legs,
              'entry_credit': st.get('entry_credit'), 'mid_credit': None,
-             'spot': None, 'dte0': dte, 'strategy_state': st.get('strategy_state')}
+             'spot': None, 'dte0': dte, 'strategy_state': st.get('strategy_state'),
+             'qty': st.get('qty') or 1,
+             'commission_per_leg': float(os.environ.get('OBOT_CONDOR_COMMISSION_PER_LEG') or 0.0)}
     pnl_pct = condor_pnl_percent(st.get('entry_credit'), close_cost)
     last_tick = {'close_cost': close_cost,
                  'pnl_pct_of_credit': None if pnl_pct is None else round(pnl_pct, 1),

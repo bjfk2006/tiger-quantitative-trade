@@ -1077,6 +1077,7 @@ class CondorManager:
             'mode': 'condor', 'state': self.state.value, 'symbol': self.symbol,
             'expiry': self.expiry, 'qty': self.qty, 'entry_credit': self.entry_credit,
             'mid_credit': self.mid_credit, 'max_loss': self.max_loss,
+            'commission_per_leg': self._cfg.condor_commission_per_leg,
             'close_cost': self._last_close_cost, 'pnl_percent': self._last_pnl_pct,
             'dte': self._dte(self._expiry_date) if self._expiry_date else None,
             'strategy_state': self._strategy.state(),

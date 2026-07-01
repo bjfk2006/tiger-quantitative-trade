@@ -195,6 +195,14 @@ function renderCondor(c){
   h+='<div class="row">点差缺口 <b class="neg">'+pctT(gap0)+'</b> → 现 <b class="'+(pnl>=0?'pos':'neg')+'">'+pctT(pnl)+'</b>'+
      (c.theta_filled_pt!==null && c.theta_filled_pt!==undefined?' (theta已填 '+(c.theta_filled_pt>=0?'+':'')+c.theta_filled_pt.toFixed(1)+'pt)':'')+'</div>';
   h+='<div class="pbar"><i style="width:'+prog.toFixed(0)+'%"></i></div>';
+  if(c.net_pnl_usd!==null && c.net_pnl_usd!==undefined){
+    const np=c.net_pnl_usd;
+    h+='<div class="row"><b>扣佣净盈亏 <span class="'+(np>=0?'pos':'neg')+'">'+(np>=0?'+':'')+'$'+np.toFixed(2)+'</span></b>'+
+       ' <span class="kv">(毛 '+(c.gross_pnl_usd>=0?'+':'')+'$'+(c.gross_pnl_usd||0).toFixed(2)+' − 往返佣金 $'+(c.commission_rt||0).toFixed(2)+')</span>'+
+       (c.net_pnl_pct!==null&&c.net_pnl_pct!==undefined?' · 净 '+pctT(c.net_pnl_pct):'')+'</div>';
+    if(c.commission_drag_pct!==null&&c.commission_drag_pct!==undefined)
+      h+='<div class="row kv">佣金拖累 '+c.commission_drag_pct.toFixed(1)+'% — 毛盈亏须先过这道坎才净赚</div>';
+  }
   if(c.warns && c.warns.length) h+='<div class="row warn">⚠ '+c.warns.join(' | ')+'</div>';
   return h;
 }

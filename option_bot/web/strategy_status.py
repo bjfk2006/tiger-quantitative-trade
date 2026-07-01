@@ -46,6 +46,18 @@ def compute_condor_view(entry, last_tick=None, spot=None):
     gap0_pct = ((ec - mc) / ec * 100.0) if ec and mc else None
     theta_filled_pt = (pnl_pct - gap0_pct) if (pnl_pct is not None and gap0_pct is not None) else None
 
+    # 扣佣净盈亏：佣金按合约线性(每腿每次执行 commission_per_leg)，往返=腿数×2×张数。
+    # 净盈亏$ = 毛盈亏$ − 往返佣金；佣金拖累% = 往返佣金 / 毛权利金$；净pnl% = 毛pnl% − 拖累%。
+    mult, qty = 100, (entry.get('qty') or 1)
+    comm_leg = entry.get('commission_per_leg') or 0.0
+    n_legs = len(legs)
+    commission_rt = comm_leg * n_legs * 2 * qty if comm_leg else None
+    gross_credit_usd = (ec * mult * qty) if ec else None
+    gross_pnl_usd = ((ec - close_cost) * mult * qty) if (ec is not None and close_cost is not None) else None
+    net_pnl_usd = (gross_pnl_usd - commission_rt) if (gross_pnl_usd is not None and commission_rt is not None) else None
+    commission_drag_pct = (commission_rt / gross_credit_usd * 100.0) if (commission_rt and gross_credit_usd) else None
+    net_pnl_pct = (pnl_pct - commission_drag_pct) if (pnl_pct is not None and commission_drag_pct is not None) else None
+
     # 结构侧：两短腿都有=both；只 call=bear call；只 put=bull put
     side = ('both' if (sp is not None and sc is not None)
             else 'call' if sc is not None
@@ -60,6 +72,9 @@ def compute_condor_view(entry, last_tick=None, spot=None):
         'open_spot': entry.get('spot'),
         'entry_credit': ec, 'mid_credit': mc, 'close_cost': close_cost,
         'gap0_pct': gap0_pct, 'pnl_pct': pnl_pct, 'theta_filled_pt': theta_filled_pt,
+        'qty': qty, 'commission_rt': commission_rt, 'gross_pnl_usd': gross_pnl_usd,
+        'net_pnl_usd': net_pnl_usd, 'net_pnl_pct': net_pnl_pct,
+        'commission_drag_pct': commission_drag_pct,
         'armed': armed,
         'spot': None, 'd_put': None, 'd_call': None,
         'buf_put_pct': None, 'buf_call_pct': None, 'near': None, 'spot_side': None,
@@ -101,6 +116,7 @@ def _engine_entry(es):
                   'strike': l.get('strike')} for l in es.get('legs', [])],
         'entry_credit': es.get('entry_credit'), 'mid_credit': es.get('mid_credit'),
         'spot': es.get('spot'), 'strategy_state': es.get('strategy_state'),
+        'qty': es.get('qty') or 1, 'commission_per_leg': es.get('commission_per_leg'),
     }
 
 

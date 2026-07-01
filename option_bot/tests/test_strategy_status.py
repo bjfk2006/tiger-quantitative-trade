@@ -69,6 +69,29 @@ class TestComputeCondorView(unittest.TestCase):
         self.assertIsNone(v['gap0_pct'])
         self.assertIsNone(v['theta_filled_pt'])
 
+    def test_commission_net_pnl(self):
+        # 毛吃 ~27% 权利金，扣往返佣金后净利接近 0（4腿×2×$3.22=$25.76）
+        e = dict(ENTRY, entry_credit=1.05, qty=1, commission_per_leg=3.22)
+        t = {'close_cost': 0.77, 'pnl_pct_of_credit': 26.7, 'dte': 30}
+        v = compute_condor_view(e, t, spot=None)
+        self.assertAlmostEqual(v['commission_rt'], 25.76, places=2)
+        self.assertAlmostEqual(v['gross_pnl_usd'], 28.0, places=1)
+        self.assertAlmostEqual(v['net_pnl_usd'], 28.0 - 25.76, places=2)
+        self.assertAlmostEqual(v['commission_drag_pct'], 24.5, places=1)
+        self.assertAlmostEqual(v['net_pnl_pct'], 26.7 - 24.5, places=1)
+
+    def test_no_commission_leaves_net_none(self):
+        v = compute_condor_view(ENTRY, TICK, spot=None)   # commission_per_leg 未给
+        self.assertIsNone(v['commission_rt'])
+        self.assertIsNone(v['net_pnl_usd'])
+
+    def test_single_side_half_commission(self):
+        call_legs = [{'side': 'SELL', 'put_call': 'CALL', 'strike': 784.0},
+                     {'side': 'BUY', 'put_call': 'CALL', 'strike': 790.0}]
+        e = dict(ENTRY, legs=call_legs, entry_credit=0.6, qty=1, commission_per_leg=3.22)
+        v = compute_condor_view(e, {'close_cost': 0.4, 'pnl_pct_of_credit': 33.3, 'dte': 30}, None)
+        self.assertAlmostEqual(v['commission_rt'], 3.22 * 2 * 2, places=2)   # 2 腿
+
     def test_missing_tick(self):
         v = compute_condor_view(ENTRY, None, spot=None)
         self.assertIsNone(v['pnl_pct'])
